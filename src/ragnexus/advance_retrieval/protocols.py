@@ -1,0 +1,16 @@
+from typing import Protocol, Sequence
+from .models import Evidence
+
+class Retriever(Protocol):
+    def search(self, query: str, workspace_id: str,
+               document_ids: Sequence[str] | None, top_k: int) -> list[Evidence]: ...
+
+class QueryGenerator(Protocol):
+    def generate_queries(self, query: str, max_queries: int) -> list[str]: ...
+    def decompose(self, query: str, max_subquestions: int) -> list[str]: ...
+
+class ParentExpander(Protocol):
+    def expand_parent(self, evidence: Evidence) -> Evidence | None: ...
+
+class EvidenceVerifier(Protocol):
+    def verify(self, query: str, evidence: list[Evidence]) -> dict: ...

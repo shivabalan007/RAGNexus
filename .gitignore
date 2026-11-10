@@ -1,0 +1,72 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Model/cache files
+.cache/
+models/
+*.pkl
+*.index
+
+# Generated data
+data/
+artifacts/
+
+# Legacy reference
+legacy/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Generated files
+*.db
+*.sqlite3
+
+# Model files
+*.pt
+*.pth
+*.onnx
+
+# Temporary files
+temp/
+tmp/

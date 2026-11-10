@@ -1,0 +1,30 @@
+# Existing RAG dependencies
+sentence-transformers
+transformers
+faiss-cpu
+rank-bm25
+numpy
+pandas
+
+# Existing application
+streamlit
+python-dotenv
+pypdf
+tiktoken
+
+# LLM and orchestration
+openai
+langchain
+langchain-core
+langchain-openai
+langgraph
+
+# Database and memory
+sqlalchemy
+psycopg2-binary
+pgvector
+redis
+
+# Web search and evaluation
+tavily-python
+rouge-score
