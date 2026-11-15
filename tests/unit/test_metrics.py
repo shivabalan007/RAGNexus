@@ -19,3 +19,12 @@ def test_answer_metrics():
     assert exact_match("Hello, WORLD!", "hello world") == 1.0
     assert token_f1("a b c", "a b") > 0.0
     assert token_f1("alpha", "beta") == 0.0
+
+
+def test_ndcg_uses_requested_k_even_when_fewer_results_returned():
+    from ragnexus.evaluation.metrics import retrieval_metrics
+
+    result = retrieval_metrics(["a", "b"], ["x"], k=5)
+    assert result["precision_at_k"] == 0.0
+    assert result["recall_at_k"] == 0.0
+    assert result["ndcg"] == 0.0

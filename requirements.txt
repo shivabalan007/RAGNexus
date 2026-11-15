@@ -1,0 +1,40 @@
+# Core API and database
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.8
+pydantic-settings>=2.4
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+pgvector>=0.3
+alembic>=1.13
+python-multipart>=0.0.9
+PyJWT>=2.8
+pwdlib[argon2]>=0.2
+
+# Ingestion and retrieval
+sentence-transformers>=3.0
+numpy>=1.26
+rank-bm25>=0.2.2
+pypdf>=5.0
+python-docx>=1.1
+beautifulsoup4>=4.12
+
+# Model providers and agentic orchestration
+openai>=1.40
+langgraph>=0.2
+langchain-core>=0.3
+tavily-python>=0.5
+
+# UI, HTTP and optional cache/storage
+streamlit>=1.38
+requests>=2.32
+python-dotenv>=1.0
+redis>=5.0
+boto3>=1.35
+
+# Structured tracing (OTLP is activated only when OTEL_ENABLED=true)
+opentelemetry-api>=1.27
+opentelemetry-sdk>=1.27
+opentelemetry-exporter-otlp-proto-grpc>=1.27
+opentelemetry-instrumentation-fastapi>=0.48b0
+opentelemetry-instrumentation-sqlalchemy>=0.48b0

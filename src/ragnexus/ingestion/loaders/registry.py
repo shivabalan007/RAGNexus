@@ -11,6 +11,7 @@ from ragnexus.ingestion.loaders.html_loader import HTMLLoader
 LOADERS = {
     ".pdf": PDFLoader(),
     ".txt": TextLoader(),
+    ".md": TextLoader(),
     ".csv": CSVLoader(),
     ".docx": DOCXLoader(),
     ".html": HTMLLoader(),

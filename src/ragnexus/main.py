@@ -4,6 +4,7 @@ from ragnexus.api.v1.router import api_router
 from ragnexus.api.exception_handlers import register_exception_handlers
 from ragnexus.config import settings
 from ragnexus.lifespan import lifespan
+from ragnexus.observability.middleware import RequestContextMiddleware
 
 
 app = FastAPI(
@@ -13,6 +14,8 @@ app = FastAPI(
     lifespan=lifespan,
     debug=settings.DEBUG,
 )
+
+app.add_middleware(RequestContextMiddleware)
 
 app.include_router(
     api_router,

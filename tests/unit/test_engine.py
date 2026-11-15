@@ -1,5 +1,5 @@
-from ragnexus.advanced_retrieval import AdvancedRetrievalEngine, RetrievalConfig
-from ragnexus.advanced_retrieval.models import Evidence
+from ragnexus.advance_retrieval import AdvancedRetrievalEngine, RetrievalConfig
+from ragnexus.advance_retrieval.models import Evidence
 
 class FakeRetriever:
     def __init__(self):

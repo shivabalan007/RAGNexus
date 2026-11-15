@@ -6,7 +6,9 @@ class TextLoader:
         text = path.read_text(encoding="utf-8-sig").strip()
         if not text:
             raise ValueError("The text file is empty.")
-        return [LoadedDocument(text, {"source_filename": original_filename, "file_type": "txt"})]
+        suffix = Path(original_filename).suffix.lower().lstrip(".") or "txt"
+        file_type = "markdown" if suffix == "md" else suffix
+        return [LoadedDocument(text, {"source_filename": original_filename, "file_type": file_type})]
 
 
 """

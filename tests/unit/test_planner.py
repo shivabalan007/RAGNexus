@@ -1,5 +1,5 @@
-from ragnexus.advanced_retrieval.models import RetrievalConfig
-from ragnexus.advanced_retrieval.planner import analyze_query, build_plan
+from ragnexus.advance_retrieval.models import RetrievalConfig
+from ragnexus.advance_retrieval.planner import analyze_query, build_plan
 
 class FakeGenerator:
     def generate_queries(self, query, max_queries):

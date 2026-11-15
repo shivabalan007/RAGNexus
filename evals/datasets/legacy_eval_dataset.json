@@ -1,0 +1,42 @@
+[
+    {
+        "question": "What is Object-Oriented Programming?",
+        "expected_answer": "Object-Oriented Programming is a programming paradigm that organizes software design around data or objects rather than functions and logic."
+    },
+    {
+        "question": "What are the four principles of OOP?",
+        "expected_answer": "The four main principles of OOP are encapsulation, abstraction, inheritance, and polymorphism."
+    },
+    {
+        "question": "What is encapsulation?",
+        "expected_answer": "Encapsulation is the bundling of data and the methods that operate on that data into a single unit called a class."
+    },
+    {
+        "question": "Who created Python and when was it released?",
+        "expected_answer": "Python was created by Guido van Rossum and first released in 1991."
+    },
+    {
+        "question": "What is the difference between supervised and unsupervised learning?",
+        "expected_answer": "In supervised learning the model is trained on labeled data with correct outputs provided. In unsupervised learning the model is trained on unlabeled data and must find patterns on its own."
+    },
+    {
+        "question": "What is reinforcement learning?",
+        "expected_answer": "Reinforcement learning is a type of machine learning where an agent learns to make decisions by interacting with an environment receiving rewards for correct actions and penalties for incorrect actions."
+    },
+    {
+        "question": "What is deep learning?",
+        "expected_answer": "Deep learning is a subset of machine learning that uses neural networks with many layers called deep neural networks to model complex patterns in data."
+    },
+    {
+        "question": "What is the difference between SQL and NoSQL databases?",
+        "expected_answer": "SQL databases are relational and store data in tables with rows and columns. NoSQL databases are non-relational and provide flexible schemas for storage and retrieval of data."
+    },
+    {
+        "question": "What is an API?",
+        "expected_answer": "An API is a set of rules and protocols that allows different software applications to communicate with each other."
+    },
+    {
+        "question": "What is Docker?",
+        "expected_answer": "Docker is a platform that allows developers to package applications and their dependencies into lightweight portable containers that run consistently across different machines."
+    }
+]

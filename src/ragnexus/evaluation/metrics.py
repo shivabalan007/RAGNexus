@@ -16,11 +16,12 @@ def retrieval_metrics(relevant_ids: Iterable[str], retrieved_ids: Sequence[str],
     if not relevant:
         return {"precision_at_k": 0.0, "recall_at_k": 0.0, "hit_rate": 0.0, "mrr": 0.0, "ndcg": 0.0}
     hits = [1 if item in relevant else 0 for item in ranked]
-    precision = sum(hits) / max(len(ranked), 1)
+    precision = sum(hits) / max(k if k is not None else len(ranked), 1)
     recall = sum(hits) / len(relevant)
     reciprocal_rank = next((1.0 / (i + 1) for i, hit in enumerate(hits) if hit), 0.0)
     dcg = sum(hit / math.log2(i + 2) for i, hit in enumerate(hits))
-    ideal_hits = min(len(relevant), len(ranked))
+    ideal_depth = k if k is not None else len(ranked)
+    ideal_hits = min(len(relevant), ideal_depth)
     idcg = sum(1.0 / math.log2(i + 2) for i in range(ideal_hits))
     return {
         "precision_at_k": precision,
@@ -45,3 +46,12 @@ def token_f1(prediction: str, reference: str) -> float:
 
 def exact_match(prediction: str, reference: str) -> float:
     return float(" ".join(_normalise(prediction)) == " ".join(_normalise(reference)))
+
+
+def expected_fact_coverage(answer: str, expected_facts: Iterable[str]) -> float:
+    """Return lexical coverage of annotated facts (not a semantic faithfulness judge)."""
+    facts = [" ".join(_normalise(str(fact))) for fact in expected_facts if str(fact).strip()]
+    if not facts:
+        return 0.0
+    normalized_answer = " ".join(_normalise(answer))
+    return sum(1 for fact in facts if fact and fact in normalized_answer) / len(facts)

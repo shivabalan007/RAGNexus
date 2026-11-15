@@ -21,9 +21,11 @@ from ragnexus.schemas.workspace import (
 router = APIRouter(prefix="/workspaces", tags=["Workspaces"])
 
 
-@router.get("", response_model=list[WorkspaceRead])
+@router.get("")
 def get_workspaces(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return [workspace for workspace, _role in list_workspaces(db, user.id)]
+    return [{"id": workspace.id, "name": workspace.name, "workspace_type": workspace.workspace_type,
+             "created_by": workspace.created_by, "created_at": workspace.created_at, "role": role}
+            for workspace, role in list_workspaces(db, user.id)]
 
 
 @router.post("", response_model=WorkspaceRead, status_code=status.HTTP_201_CREATED)
@@ -32,12 +34,28 @@ def post_workspace(payload: WorkspaceCreate, db: Session = Depends(get_db), user
 
 
 @router.get("/{workspace_id}", response_model=WorkspaceRead)
-def get_workspace(workspace_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    membership = get_membership(db, workspace_id, user.id)
+def get_workspace(
+    workspace_id: UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        membership = get_membership(db, workspace_id, user.id)
+    except WorkspaceNotFound:
+        raise HTTPException(
+            status_code=404,
+            detail="Workspace not found.",
+        )
+
     require_permission(membership.role, "workspace:read")
+
     workspace = db.get(Workspace, workspace_id)
     if workspace is None:
-        raise HTTPException(status_code=404, detail="Workspace not found.")
+        raise HTTPException(
+            status_code=404,
+            detail="Workspace not found.",
+        )
+
     return workspace
 
 

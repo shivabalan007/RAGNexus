@@ -195,6 +195,10 @@ def init_state() -> None:
         "chat_visibility": "private",
         "document_scope": "workspace",
         "selected_document_ids": [],
+        "chat_pipeline_mode": "standard",
+        "enable_web_search": False,
+        "history_search": "",
+        "profile_loaded": False,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -347,16 +351,47 @@ with st.sidebar:
 
     st.session_state.page = st.radio(
         "Navigation",
-        ["Chat", "Documents"],
-        index=0 if st.session_state.page == "Chat" else 1,
+        ["Chat", "Documents", "Profile"],
+        index={"Chat": 0, "Documents": 1, "Profile": 2}.get(st.session_state.page, 0),
         label_visibility="collapsed",
     )
+
+    st.divider()
+    if st.session_state.page == "Chat" and st.session_state.workspace_id:
+        st.caption("RECENT CONVERSATIONS")
+        history_query = st.text_input("Search chats", key="history_search", placeholder="Search conversations")
+        try:
+            history_rows = api().chat_sessions(st.session_state.workspace_id, history_query, limit=40)
+            for chat in history_rows:
+                chat_id = str(chat["id"])
+                chat_title = chat.get("title") or "New conversation"
+                hcol, mcol = st.columns([5, 1])
+                with hcol:
+                    if st.button(chat_title[:34], key=f"open_chat_{chat_id}", use_container_width=True):
+                        st.session_state.session_id = chat_id
+                        st.session_state.messages = []
+                        st.session_state.last_chat_meta = None
+                        st.session_state.page = "Chat"
+                        st.rerun()
+                with mcol:
+                    with st.popover("⋯"):
+                        new_title = st.text_input("Rename", value=chat_title, key=f"rename_title_{chat_id}")
+                        if st.button("Save title", key=f"rename_{chat_id}"):
+                            api().rename_chat_session(chat_id, new_title)
+                            st.rerun()
+                        if st.button("Delete chat", key=f"delete_chat_{chat_id}"):
+                            api().delete_chat_session(chat_id)
+                            if st.session_state.session_id == chat_id:
+                                reset_chat()
+                            st.rerun()
+        except APIError as exc:
+            st.caption(f"History unavailable: {exc}")
 
     st.divider()
     workspaces = st.session_state.workspaces or []
     if workspaces:
         workspace_labels = {
-            str(w["id"]): f"{w.get('name', 'Workspace')} · {w.get('workspace_type', 'workspace')}"
+            str(w["id"]): f"{w.get('name', 'Workspace')} · {w.get('role', 'member')}"
             for w in workspaces
         }
         workspace_ids = list(workspace_labels)
@@ -373,6 +408,7 @@ with st.sidebar:
         )
         if chosen_id != st.session_state.workspace_id:
             st.session_state.workspace_id = chosen_id
+            st.session_state.selected_document_ids = []
             reset_chat()
             try:
                 refresh_documents()
@@ -401,6 +437,9 @@ with st.sidebar:
     email = user.get("email") or "Signed-in user"
     st.caption("PROFILE")
     st.markdown(f"**{email}**")
+    if st.button("Open profile", use_container_width=True):
+        st.session_state.page = "Profile"
+        st.rerun()
     if st.button("Sign out", use_container_width=True):
         clear_auth()
         st.rerun()
@@ -551,6 +590,18 @@ def render_documents_page() -> None:
             error_message = item.get("error_message") or item.get("failure_reason")
             if status == "failed" and error_message:
                 st.error(str(error_message))
+            if status != "deleted":
+                with st.popover("Document actions"):
+                    st.warning("Deleting removes this document from retrieval and removes its stored file.")
+                    confirm = st.checkbox("I understand this action cannot be undone", key=f"confirm_delete_doc_{item['id']}")
+                    if st.button("Delete document", key=f"delete_doc_{item['id']}", type="primary", disabled=not confirm):
+                        try:
+                            api().delete_document(workspace_id, str(item["id"]))
+                            refresh_documents()
+                            st.success("Document deleted.")
+                            st.rerun()
+                        except APIError as exc:
+                            show_api_error(exc)
 
 
 # ---------------------------------------------------------------------
@@ -594,11 +645,48 @@ def render_citations(citations: list[dict[str, Any]]) -> None:
         for cite in citations:
             source_no = cite.get("source_number", "?")
             filename = cite.get("filename") or "Document"
-            st.markdown(f"**[{source_no}] {filename}**")
+            if cite.get("source_type") == "web" and cite.get("url"):
+                st.markdown(f"**[{source_no}] [{cite.get('title') or filename}]({cite['url']})**")
+                st.caption("Web source · Retrieved through Tavily")
+            else:
+                st.markdown(f"**[{source_no}] {filename}**")
+                st.caption(f"Document: {cite.get('document_id', 'N/A')} · Chunk: {cite.get('chunk_id', 'N/A')}")
+            if cite.get("excerpt"):
+                st.caption(str(cite["excerpt"])[:700])
+
+def render_message_diagnostics(metadata: dict[str, Any]) -> None:
+    diagnostics = metadata.get("diagnostics") or {}
+    if not diagnostics and not metadata.get("model"):
+        return
+    with st.expander("Answer details", expanded=False):
+        a, b, c, d = st.columns(4)
+        a.metric("Retrieved chunks", metadata.get("retrieved_count", 0))
+        b.metric("Latency", f"{metadata.get('latency_ms', 0):.0f} ms")
+        c.metric("Citations", diagnostics.get("citation_count", len(metadata.get("citations") or [])))
+        d.metric("Model", metadata.get("model") or "N/A")
+        x, y, z, w = st.columns(4)
+        x.metric("Dense", f"{diagnostics.get('dense_latency_ms', 0):.1f} ms")
+        y.metric("BM25", f"{diagnostics.get('bm25_latency_ms', 0):.1f} ms")
+        z.metric("Fusion", f"{diagnostics.get('fusion_latency_ms', 0):.1f} ms")
+        w.metric("Reranking", f"{diagnostics.get('rerank_latency_ms', 0):.1f} ms")
+        p, q, r, s_col = st.columns(4)
+        p.metric("Pipeline", diagnostics.get("pipeline_mode", "standard"))
+        q.metric("Retrieval mode", diagnostics.get("retrieval_mode", "hybrid"))
+        r.metric("Queries searched", diagnostics.get("multi_query_count", 1))
+        s_col.metric("Evidence", "Sufficient" if diagnostics.get("evidence_sufficient") else "Insufficient")
+        st.caption(
+            f"Scope: {diagnostics.get('document_scope', 'unknown')} · "
+            f"Visibility: {diagnostics.get('visibility', 'unknown')} · "
+            f"Evidence check: {diagnostics.get('evidence_reason', 'not reported')}"
+        )
+        if diagnostics.get("agent_route"):
             st.caption(
-                f"Document: {cite.get('document_id', 'N/A')} · "
-                f"Chunk: {cite.get('chunk_id', 'N/A')}"
+                f"Agent route: {diagnostics.get('agent_route')} · "
+                f"Corrective retries: {diagnostics.get('agent_retries', 0)} · "
+                f"Web results: {diagnostics.get('web_result_count', 0)}"
             )
+        if diagnostics.get("answer_verification"):
+            st.caption(f"Answer verification: {diagnostics['answer_verification'].get('status', 'unknown')}")
 
 
 def render_chat_page() -> None:
@@ -607,9 +695,10 @@ def render_chat_page() -> None:
         st.markdown('<div class="rn-section-title">Knowledge Assistant</div>', unsafe_allow_html=True)
         st.caption(f"Workspace · {workspace.get('name', 'Unknown')}")
     with context_col:
-        st.caption(
-            f"{len(indexed_docs)} indexed document(s) available"
-        )
+        latest_meta = next((m.get("metadata", {}) for m in reversed(st.session_state.messages) if m.get("role") == "assistant"), {})
+        active_model = latest_meta.get("model") or (st.session_state.last_chat_meta or {}).get("model") or "Model selected by provider"
+        st.markdown(f"<div style='text-align:right;color:#a5b4fc;font-size:.82rem'>◈ {active_model}</div>", unsafe_allow_html=True)
+        st.caption(f"{len(indexed_docs)} indexed document(s) available")
 
     with st.expander("Conversation settings", expanded=not bool(st.session_state.session_id)):
         setting_a, setting_b = st.columns(2)
@@ -650,6 +739,20 @@ def render_chat_page() -> None:
         else:
             st.caption("The conversation can retrieve from eligible indexed documents in this workspace.")
 
+        mode_col, web_col = st.columns(2)
+        with mode_col:
+            st.session_state.chat_pipeline_mode = st.selectbox(
+                "RAG execution mode", ["standard", "agentic"],
+                index=0 if st.session_state.chat_pipeline_mode == "standard" else 1,
+                help="Agentic mode adds query routing, bounded corrective retrieval, optional Tavily search and answer verification.",
+            )
+        with web_col:
+            st.session_state.enable_web_search = st.checkbox(
+                "Allow Tavily web search", value=bool(st.session_state.enable_web_search),
+                disabled=st.session_state.chat_pipeline_mode != "agentic",
+                help="Web evidence is added only in Agentic mode. Configure TAVILY_API_KEY on the API server.",
+            )
+
     if not indexed_docs:
         st.warning(
             "No indexed documents are available yet. You can explore the chat interface, "
@@ -689,7 +792,9 @@ def render_chat_page() -> None:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
             if message["role"] == "assistant":
-                render_citations((message.get("metadata") or {}).get("citations") or [])
+                message_meta = message.get("metadata") or {}
+                render_citations(message_meta.get("citations") or [])
+                render_message_diagnostics(message_meta)
 
     query = st.chat_input("Message RAGNexus...")
     if query:
@@ -703,7 +808,7 @@ def render_chat_page() -> None:
 
             with st.chat_message("assistant"):
                 with st.spinner("Searching your documents and preparing an answer..."):
-                    result = api().send_message(session_id, query)
+                    result = api().send_message(session_id, query, pipeline_mode=st.session_state.chat_pipeline_mode, enable_web_search=st.session_state.enable_web_search)
                 answer = result.get("answer") or "The API returned an empty answer."
                 st.markdown(answer)
                 citations = result.get("citations") or []
@@ -715,7 +820,14 @@ def render_chat_page() -> None:
                 {
                     "role": "assistant",
                     "content": answer,
-                    "metadata": {"citations": citations},
+                    "metadata": {
+                        "citations": citations,
+                        "retrieved_count": result.get("retrieved_count", 0),
+                        "latency_ms": result.get("latency_ms", 0),
+                        "model": result.get("model"),
+                        "prompt_tokens": result.get("prompt_tokens"),
+                        "diagnostics": result.get("diagnostics") or {},
+                    },
                 }
             )
             st.session_state.last_chat_meta = result
@@ -726,13 +838,52 @@ def render_chat_page() -> None:
     if st.session_state.last_chat_meta:
         result = st.session_state.last_chat_meta
         with st.expander("Answer details", expanded=False):
-            d1, d2, d3 = st.columns(3)
-            d1.metric("Retrieved chunks", result.get("retrieved_count", 0))
-            d2.metric("Latency", f"{result.get('latency_ms', 0):.0f} ms")
-            d3.metric("Model", result.get("model") or "N/A")
-            st.caption(
-                "Diagnostics are informational. They do not establish answer correctness."
-            )
+            d = result.get("diagnostics") or {}
+            cols = st.columns(4)
+            cols[0].metric("Retrieved chunks", result.get("retrieved_count", 0))
+            cols[1].metric("Total latency", f"{result.get('latency_ms', 0):.0f} ms")
+            cols[2].metric("Citations", d.get("citation_count", len(result.get("citations") or [])))
+            cols[3].metric("Prompt tokens", result.get("prompt_tokens") or "N/A")
+            stage = st.columns(4)
+            stage[0].metric("Dense", f"{d.get('dense_latency_ms', 0):.1f} ms")
+            stage[1].metric("BM25", f"{d.get('bm25_latency_ms', 0):.1f} ms")
+            stage[2].metric("Fusion", f"{d.get('fusion_latency_ms', 0):.1f} ms")
+            stage[3].metric("Reranking", f"{d.get('rerank_latency_ms', 0):.1f} ms")
+            p, q, r, s_col = st.columns(4)
+            p.metric("Pipeline", d.get("pipeline_mode", "standard"))
+            q.metric("Retrieval mode", d.get("retrieval_mode", "hybrid"))
+            r.metric("Queries searched", d.get("multi_query_count", 1))
+            s_col.metric("Evidence", "Sufficient" if d.get("evidence_sufficient") else "Insufficient")
+            st.caption(f"Scope: {d.get('document_scope', 'unknown')} · Visibility: {d.get('visibility', 'unknown')} · Model: {result.get('model') or 'N/A'}")
+            st.caption(f"Query planning: {d.get('query_planning_latency_ms', 0):.1f} ms · Parent expansion: {d.get('parent_expansion_latency_ms', 0):.1f} ms · Compression: {d.get('compression_latency_ms', 0):.1f} ms")
+            if d.get("agent_route"):
+                st.caption(f"Agent route: {d.get('agent_route')} · Retries: {d.get('agent_retries', 0)} · Web results: {d.get('web_result_count', 0)}")
+            if d.get("answer_verification"):
+                st.caption(f"Answer verification: {d['answer_verification'].get('status', 'unknown')}")
+            st.caption("Timings are measured by the current request; total latency includes generation and orchestration work.")
+
+
+def render_profile_page() -> None:
+    st.markdown('<div class="rn-section-title">Your profile</div>', unsafe_allow_html=True)
+    user = st.session_state.user or {}
+    email = user.get("email", "Signed-in user")
+    initial = email[:1].upper() if email else "U"
+    st.markdown(f"<div class='rn-panel' style='display:flex;align-items:center;gap:18px'><div style='width:64px;height:64px;border-radius:50%;display:grid;place-items:center;background:linear-gradient(135deg,#6366f1,#06b6d4);font-size:26px;font-weight:800'>{initial}</div><div><div style='font-size:1.25rem;font-weight:750'>{email}</div><div class='rn-muted'>RAGNexus account</div></div></div>", unsafe_allow_html=True)
+    st.write("")
+    current = next((w for w in st.session_state.workspaces if str(w.get("id")) == str(st.session_state.workspace_id)), {})
+    a, b, c = st.columns(3)
+    a.metric("Workspaces", len(st.session_state.workspaces))
+    b.metric("Documents in current workspace", len(documents))
+    c.metric("Indexed documents", len(indexed_docs))
+    st.markdown("### Current workspace")
+    st.info(f"{current.get('name', 'No workspace selected')} · {current.get('role', 'member')}")
+    st.markdown("### Preferences")
+    st.caption("Conversation visibility and knowledge scope are selected per new conversation. Existing conversations retain their original settings.")
+    st.markdown("### Security")
+    st.caption("Your access token is used for authenticated API requests. Sign out to end this browser session. Password changes and session revocation are not exposed by the current backend.")
+    if st.button("Sign out", type="primary"):
+        clear_auth()
+        st.rerun()
 
 
 # ---------------------------------------------------------------------
@@ -740,5 +891,7 @@ def render_chat_page() -> None:
 # ---------------------------------------------------------------------
 if st.session_state.page == "Documents":
     render_documents_page()
+elif st.session_state.page == "Profile":
+    render_profile_page()
 else:
     render_chat_page()

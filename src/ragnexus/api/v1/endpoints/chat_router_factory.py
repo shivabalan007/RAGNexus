@@ -32,6 +32,36 @@ def create_chat_router(*, get_current_user: Callable, orchestration: RAGOrchestr
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
 
+    @router.get("/sessions")
+    def list_sessions(workspace_id: UUID, search: str | None = None, limit: int = 50, offset: int = 0,
+                      db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+        rows = ConversationRepository.list_sessions(db, user_id=current_user.id, workspace_id=workspace_id,
+                                                     search=search, limit=limit, offset=offset)
+        return [{"id": str(row.id), "workspace_id": str(row.workspace_id), "title": row.title or "New conversation",
+                 "visibility": row.visibility, "document_scope": row.document_scope,
+                 "created_at": row.created_at.isoformat() if row.created_at else None,
+                 "updated_at": row.updated_at.isoformat() if row.updated_at else None}
+                for row in rows]
+
+    @router.patch("/sessions/{session_id}")
+    def rename_session(session_id: UUID, payload: dict, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+        title = str(payload.get("title", "")).strip()
+        if not title or len(title) > 255:
+            raise HTTPException(status_code=422, detail="Title must contain 1 to 255 characters")
+        try:
+            row = ConversationRepository.rename_session(db, session_id=session_id, user_id=current_user.id, title=title)
+            return {"id": str(row.id), "title": row.title}
+        except ConversationNotFound:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+    @router.delete("/sessions/{session_id}", status_code=204)
+    def delete_session(session_id: UUID, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+        try:
+            ConversationRepository.delete_session(db, session_id=session_id, user_id=current_user.id)
+        except ConversationNotFound:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        return None
+
     @router.get("/sessions/{session_id}/messages")
     def get_session_messages(session_id: UUID, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
         try:
@@ -55,6 +85,7 @@ def create_chat_router(*, get_current_user: Callable, orchestration: RAGOrchestr
             result = orchestration.chat(
                 db, user_id=current_user.id, session_id=payload.session_id,
                 query=payload.query, candidate_k=payload.candidate_k, final_k=payload.final_k,
+                pipeline_mode=payload.pipeline_mode, enable_web_search=payload.enable_web_search,
             )
             return result.to_dict()
         except ConversationNotFound:

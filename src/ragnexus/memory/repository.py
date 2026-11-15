@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from uuid import UUID
+from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.orm import Session
 
 from ragnexus.infrastructure.database.models.conversation import Message, Session as ChatSession
@@ -117,6 +118,12 @@ class ConversationRepository:
     ) -> Message:
         if role not in {"user", "assistant"}:
             raise ValueError("Only user and assistant messages can be appended by chat orchestration")
+        session = db.get(ChatSession, session_id)
+        if session is None:
+            raise ConversationNotFound("Conversation not found")
+        if role == "user" and not session.title:
+            session.title = content.strip().replace("\n", " ")[:72] or "New conversation"
+        session.updated_at = datetime.now(timezone.utc)
         message = Message(
             session_id=session_id,
             role=role,
@@ -131,3 +138,35 @@ class ConversationRepository:
         except Exception:
             db.rollback()
             raise
+
+    @staticmethod
+    def list_sessions(db: Session, *, user_id: UUID, workspace_id: UUID,
+                      search: str | None = None, limit: int = 50, offset: int = 0) -> list[ChatSession]:
+        from ragnexus.infrastructure.database.models.workspace import WorkspaceMember
+        stmt = (select(ChatSession)
+                .join(WorkspaceMember, WorkspaceMember.workspace_id == ChatSession.workspace_id)
+                .where(WorkspaceMember.user_id == user_id, ChatSession.workspace_id == workspace_id)
+                .where((ChatSession.visibility == "workspace") | (ChatSession.created_by_user_id == user_id)))
+        if search and search.strip():
+            term = f"%{search.strip()}%"
+            matching_sessions = select(Message.session_id).where(Message.content.ilike(term))
+            stmt = stmt.where(or_(ChatSession.title.ilike(term), ChatSession.id.in_(matching_sessions)))
+        return list(db.scalars(stmt.order_by(ChatSession.updated_at.desc(), ChatSession.created_at.desc())
+                               .offset(offset).limit(min(max(limit, 1), 100))).all())
+
+    @staticmethod
+    def rename_session(db: Session, *, session_id: UUID, user_id: UUID, title: str) -> ChatSession:
+        session = ConversationRepository.get_authorized_session(db, session_id=session_id, user_id=user_id)
+        if session.created_by_user_id != user_id:
+            raise ConversationNotFound("Conversation not found")
+        session.title = title.strip()[:255]
+        db.commit(); db.refresh(session)
+        return session
+
+    @staticmethod
+    def delete_session(db: Session, *, session_id: UUID, user_id: UUID) -> None:
+        session = ConversationRepository.get_authorized_session(db, session_id=session_id, user_id=user_id)
+        if session.created_by_user_id != user_id:
+            raise ConversationNotFound("Conversation not found")
+        db.delete(session)
+        db.commit()

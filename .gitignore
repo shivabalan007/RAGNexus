@@ -70,3 +70,49 @@ Thumbs.db
 # Temporary files
 temp/
 tmp/
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+temp/
+tmp/
+*.db
+*.sqlite3
+
+# Model and cache artifacts
+.cache/
+models/
+*.pkl
+*.index
+*.pt
+*.pth
+*.onnx
+
+# Runtime document data and generated evaluation artifacts
+data/documents/
+evals/reports/
+artifacts/
+
+# Keep legacy code as source reference; do not ignore it.

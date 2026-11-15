@@ -1,21 +1,22 @@
 from pathlib import Path
 from uuid import UUID
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from ragnexus.core.permissions import require_permission
 from ragnexus.infrastructure.database.models.document import Document
 from ragnexus.infrastructure.database.models.ingestion import IngestionJob
 from ragnexus.infrastructure.database.models.workspace import WorkspaceMember
-from ragnexus.infrastructure.storage.local_storage import LocalDocumentStorage
 
-ALLOWED_EXTENSIONS = {".pdf", ".txt", ".csv", ".docx", ".html", ".htm"}
+
+ALLOWED_EXTENSIONS = {".pdf", ".txt", ".md", ".csv", ".docx", ".html", ".htm"}
 
 class WorkspaceAccessDenied(Exception): pass
 class DuplicateDocument(Exception): pass
 
 
 def create_upload(db: Session, *, workspace_id: UUID, user_id: UUID, filename: str,
-                  stream, storage: LocalDocumentStorage, max_bytes: int) -> tuple[Document, IngestionJob, bool]:
+                  stream, storage, max_bytes: int, chunking_strategy: str = "structure_aware") -> tuple[Document, IngestionJob | None, bool]:
     suffix = Path(filename).suffix.lower()
     if suffix not in ALLOWED_EXTENSIONS:
         raise ValueError(f"Unsupported file type: {suffix}")
@@ -31,6 +32,7 @@ def create_upload(db: Session, *, workspace_id: UUID, user_id: UUID, filename: s
         existing = db.scalar(select(Document).where(
             Document.workspace_id == workspace_id,
             Document.content_hash == content_hash,
+            Document.status != "deleted",
         ))
         if existing is not None:
             storage.delete(stored_path)
@@ -58,7 +60,7 @@ def create_upload(db: Session, *, workspace_id: UUID, user_id: UUID, filename: s
             file_size=size,
             status="pending",
             parser_version="ingestion-v1",
-            chunking_strategy="fixed",
+            chunking_strategy=chunking_strategy,
             embedding_model=None,
             embedding_dimension=None,
             document_metadata={
@@ -77,6 +79,23 @@ def create_upload(db: Session, *, workspace_id: UUID, user_id: UUID, filename: s
         db.refresh(document)
         db.refresh(job)
         return document, job, False
+    except IntegrityError:
+        db.rollback()
+        # Concurrent identical uploads can race between the pre-check and insert.
+        # The partial unique index applies only to non-deleted rows.
+        existing = db.scalar(select(Document).where(
+            Document.workspace_id == workspace_id,
+            Document.content_hash == content_hash,
+            Document.status != "deleted",
+        ))
+        if existing is not None:
+            storage.delete(stored_path)
+            job = db.scalar(select(IngestionJob).where(
+                IngestionJob.document_id == existing.id
+            ).order_by(IngestionJob.created_at.desc()))
+            return existing, job, True
+        storage.delete(stored_path)
+        raise
     except Exception:
         db.rollback()
         storage.delete(stored_path)

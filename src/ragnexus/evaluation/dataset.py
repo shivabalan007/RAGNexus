@@ -14,6 +14,9 @@ class EvaluationCase:
     workspace_id: str | None = None
     document_ids: tuple[str, ...] = ()
     should_abstain: bool = False
+    relevant_source_names: tuple[str, ...] = ()
+    question_type: str | None = None
+    expected_facts: tuple[str, ...] = ()
 
 
 def load_jsonl(path: str | Path) -> list[EvaluationCase]:
@@ -24,6 +27,8 @@ def load_jsonl(path: str | Path) -> list[EvaluationCase]:
                 continue
             try:
                 raw = json.loads(line)
+                if raw.get("status") == "draft":
+                    continue
                 case = EvaluationCase(
                     case_id=str(raw["case_id"]),
                     query=str(raw["query"]),
@@ -32,11 +37,14 @@ def load_jsonl(path: str | Path) -> list[EvaluationCase]:
                     workspace_id=raw.get("workspace_id"),
                     document_ids=tuple(str(x) for x in raw.get("document_ids", [])),
                     should_abstain=bool(raw.get("should_abstain", False)),
+                    relevant_source_names=tuple(str(x) for x in raw.get("relevant_source_names", [])),
+                    question_type=raw.get("question_type"),
+                    expected_facts=tuple(str(x) for x in raw.get("expected_facts", [])),
                 )
                 if not case.case_id or not case.query.strip():
                     raise ValueError("case_id and non-empty query are required")
-                if not case.should_abstain and not case.relevant_chunk_ids:
-                    raise ValueError("non-abstention cases require relevant_chunk_ids")
+                if not case.should_abstain and not case.relevant_chunk_ids and not case.relevant_source_names:
+                    raise ValueError("non-abstention cases require relevant_chunk_ids or relevant_source_names")
                 cases.append(case)
             except Exception as exc:
                 raise ValueError(f"Invalid evaluation dataset at line {line_number}: {exc}") from exc

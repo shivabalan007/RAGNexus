@@ -23,3 +23,13 @@ def test_duplicate_case_ids_rejected(tmp_path: Path):
     path.write_text(json.dumps(item) + "\n" + json.dumps(item), encoding="utf-8")
     with pytest.raises(ValueError, match="unique"):
         load_jsonl(path)
+
+
+def test_expected_fact_coverage_uses_normalized_lexical_facts():
+    from ragnexus.evaluation.metrics import expected_fact_coverage
+
+    score = expected_fact_coverage(
+        "The Falcon project monitors warehouse temperature using sensor T-17.",
+        ["Falcon project", "sensor T-17", "alert threshold is 8 Celsius"],
+    )
+    assert score == 2 / 3

@@ -31,6 +31,8 @@ async def lifespan(app: FastAPI):
         app.state.db_session_factory = create_session_factory(engine)
 
         logger.info("PostgreSQL connection established")
+        from ragnexus.observability.telemetry import configure_opentelemetry
+        configure_opentelemetry(app, engine)
 
         yield
 

@@ -12,7 +12,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from ragnexus.config import get_settings
 from ragnexus.infrastructure.database.base import Base
 from ragnexus.infrastructure.database.connection import build_database_url
-from ragnexus.infrastructure.database import models  # noqa: F401
+import ragnexus.infrastructure.database.models as _models  # noqa: F401
 
 
 config = context.config

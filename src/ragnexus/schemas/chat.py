@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from uuid import UUID
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -18,14 +19,20 @@ class ChatRequest(BaseModel):
     query: str = Field(min_length=1, max_length=12000)
     candidate_k: int = Field(default=20, ge=1, le=100)
     final_k: int = Field(default=5, ge=1, le=20)
+    pipeline_mode: Literal["standard", "agentic"] = "standard"
+    enable_web_search: bool = False
 
 
 class CitationResponse(BaseModel):
     source_number: int
-    document_id: str
-    chunk_id: str
+    document_id: str | None = None
+    chunk_id: str | None = None
     chunk_index: int | None = None
     filename: str | None = None
+    source_type: Literal["document", "web"] = "document"
+    url: str | None = None
+    title: str | None = None
+    excerpt: str | None = None
 
 
 class ChatResponseSchema(BaseModel):
@@ -39,3 +46,4 @@ class ChatResponseSchema(BaseModel):
     model: str | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    diagnostics: dict | None = None

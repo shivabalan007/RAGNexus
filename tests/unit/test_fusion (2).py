@@ -1,5 +1,5 @@
-from ragnexus.advanced_retrieval.models import Evidence
-from ragnexus.advanced_retrieval.fusion import reciprocal_rank_fusion
+from ragnexus.advance_retrieval.models import Evidence
+from ragnexus.advance_retrieval.fusion import reciprocal_rank_fusion
 
 def test_rrf_promotes_items_relevant_in_multiple_rankings():
     a = Evidence("a", "d1", "A")

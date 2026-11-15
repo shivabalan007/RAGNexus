@@ -98,7 +98,7 @@ class RAGNexusAPI:
     def chat_messages(self, session_id: str):
         return self._request("GET", f"/chat/sessions/{session_id}/messages")
 
-    def send_message(self, session_id: str, query: str, candidate_k: int = 20, final_k: int = 5):
+    def send_message(self, session_id: str, query: str, candidate_k: int = 20, final_k: int = 5, pipeline_mode: str = "standard", enable_web_search: bool = False):
         return self._request(
             "POST", "/chat/messages",
             json={
@@ -106,6 +106,22 @@ class RAGNexusAPI:
                 "query": query,
                 "candidate_k": candidate_k,
                 "final_k": final_k,
+                "pipeline_mode": pipeline_mode,
+                "enable_web_search": enable_web_search,
             },
             timeout=120,
         )
+
+    def chat_sessions(self, workspace_id: str, search: str = "", limit: int = 50, offset: int = 0):
+        params = {"workspace_id": workspace_id, "limit": limit, "offset": offset}
+        if search.strip(): params["search"] = search.strip()
+        return self._request("GET", "/chat/sessions", params=params)
+
+    def rename_chat_session(self, session_id: str, title: str):
+        return self._request("PATCH", f"/chat/sessions/{session_id}", json={"title": title})
+
+    def delete_chat_session(self, session_id: str):
+        return self._request("DELETE", f"/chat/sessions/{session_id}")
+
+    def delete_document(self, workspace_id: str, document_id: str):
+        return self._request("DELETE", f"/workspaces/{workspace_id}/documents/{document_id}")

@@ -11,10 +11,15 @@ class RetrievedChunk:
     bm25_score: float | None = None
     rrf_score: float = 0.0
     rerank_score: float | None = None
+    context_content_override: str | None = None
 
     @property
     def content(self) -> str:
         return self.chunk.content
+
+    @property
+    def context_content(self) -> str:
+        return self.context_content_override or self.content
 
     @property
     def chunk_id(self):
@@ -49,6 +54,13 @@ class RetrievalResult:
     fusion_latency_ms: float = 0.0
     rerank_latency_ms: float = 0.0
     total_latency_ms: float = 0.0
+    multi_query_count: int = 1
+    query_planning_latency_ms: float = 0.0
+    parent_expansion_latency_ms: float = 0.0
+    compression_latency_ms: float = 0.0
+    evidence_sufficient: bool = False
+    evidence_reason: str = "no_evidence"
+    retrieval_mode: str = "hybrid"
 
     @property
     def retrieved_count(self) -> int:

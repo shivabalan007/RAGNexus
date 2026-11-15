@@ -11,7 +11,8 @@ COMPLEX_TERMS = {
 }
 
 def analyze_query(query: str) -> str:
-    q = f" {re.sub(r'\\s+', ' ', query.lower()).strip()} "
+    normalized_query = re.sub(r"\s+", " ", query.lower()).strip()
+    q = f" {normalized_query} "
     if any(term in q for term in COMPARISON_TERMS):
         return "comparison"
     if len(q.split()) >= 18 or any(term in q for term in COMPLEX_TERMS):
