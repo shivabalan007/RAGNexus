@@ -1,23 +1,30 @@
-from llm.openrouter_client import llm
-from llm.prompt import build_prompt
+from __future__ import annotations
+
+from ragnexus.llm.providers.base import ChatModel
+from ragnexus.llm.providers.factory import build_chat_model
+from ragnexus.llm.prompt import build_prompt
 
 
-def generate_answer(query, retrieved_chunks, conversation_history=None):
-
+def generate_answer(
+    query,
+    retrieved_chunks,
+    conversation_history=None,
+    *,
+    chat_model: ChatModel | None = None,
+):
+    """Generate a grounded answer through the configured provider."""
     if not retrieved_chunks:
         return "I don't know based on the provided context."
 
-    # Build the RAG prompt
     prompt = build_prompt(query, retrieved_chunks, conversation_history)
-
-    # Call LLM
-    response = llm(prompt, temperature=0.2)
-
-    if response is None:
+    model = chat_model or build_chat_model()
+    try:
+        response = model.complete(
+            [{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=1200,
+        )
+    except Exception:
         return "I couldn't generate a response."
 
-    return response.strip()
-
-"""
-Takes query and retrieved texts, builds prompt, calls LLM, returns answer. Main generation function called by all three RAG pipelines.
-"""
+    return response.text.strip() if response and response.text else "I couldn't generate a response."

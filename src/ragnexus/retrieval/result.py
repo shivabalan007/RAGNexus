@@ -61,6 +61,7 @@ class RetrievalResult:
     evidence_sufficient: bool = False
     evidence_reason: str = "no_evidence"
     retrieval_mode: str = "hybrid"
+    cache_hit: bool = False
 
     @property
     def retrieved_count(self) -> int:

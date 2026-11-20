@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ragnexus.llm.providers.base import ChatModel
+from ragnexus.rag.query.reference_signals import ReferenceSignalDetector
 
 
 class FollowUpResolver:
@@ -8,10 +9,16 @@ class FollowUpResolver:
 
     def __init__(self, model: ChatModel):
         self.model = model
+        self.reference_detector = ReferenceSignalDetector()
 
     def resolve(self, query: str, history: list[dict[str, str]]) -> str:
         query = query.strip()
         if not query or not history:
+            return query
+        # Do not spend a model call rewriting a self-contained question.
+        # Only follow-up/reference signals need conversation-aware rewriting.
+        signal = self.reference_detector.detect(query)
+        if not signal.needs_memory:
             return query
         recent = history[-8:]
         transcript = "\n".join(

@@ -22,8 +22,9 @@ This checklist is a handoff guide. It does not mean the package has been deploye
 - [ ] For S3, set `STORAGE_BACKEND=s3`, `S3_BUCKET`, `AWS_REGION` and a least-privilege IAM role/policy.
 - [ ] Verify S3 upload, download, delete, object-key isolation, encryption, lifecycle and recovery before moving production documents.
 - [ ] Do not store AWS access keys in source files or the ZIP.
-- [ ] Leave `REDIS_URL` empty to disable caching. When enabled, use private networking and authentication/TLS supported by the Redis deployment.
-- [ ] Verify cache namespace/TTL and invalidation behaviour against document updates, deletion, workspace scope and model changes.
+- [ ] Set `REDIS_URL` to a dedicated Redis database for application caches (DB 0 in the supplied Compose file); Celery broker/results use DB 1/2. Leave `REDIS_URL` empty or set `REDIS_CACHE_ENABLED=false` to disable application caching.
+- [ ] Keep Redis private and use authentication/TLS supported by the chosen Redis deployment.
+- [ ] Verify conversation, query-embedding, retrieval, Tavily and exact-repeat answer cache TTL/invalidation behaviour against session/user scope, document updates/deletion, workspace scope and model changes.
 
 ## Observability and operations
 
@@ -38,8 +39,8 @@ This checklist is a handoff guide. It does not mean the package has been deploye
 
 ## Known scope boundaries
 
-- Redis caching is limited to query embeddings; it is optional and PostgreSQL remains authoritative.
+- Redis is an optional, fail-open acceleration layer for recent conversation context, query embeddings, retrieval results, Tavily results and safe same-session exact-repeat answers. PostgreSQL remains authoritative. Cache misses or Redis outages must never block chat or ingestion.
 - Tavily is read-only web evidence. Web page content is untrusted and must not be treated as tool instructions.
 - Human approval request/decision/consumption APIs are included for sensitive operations. No destructive agent tool is registered by default; a future mutating tool must consume the exact one-time approval and independently enforce ordinary workspace permissions immediately before its side effect.
 - No rate-limiting middleware or production reverse proxy is bundled. Add and test those at the deployment boundary.
-- The supplied 120-case evaluation file is a draft labeling template, not a completed ground-truth dataset. Populate and review it against your own corpus before publishing results.
+- The supplied 100-case evaluation dataset contains 92 answerable and 8 unanswerable cases. Before reporting retrieval metrics, map the answerable cases to real indexed chunk IDs and review unresolved mappings; report mapping coverage alongside retrieval scores.

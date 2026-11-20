@@ -76,6 +76,10 @@ class RAGNexusAPI:
         files = {"file": (filename, content, mime_type or "application/octet-stream")}
         return self._request("POST", f"/workspaces/{workspace_id}/documents", files=files, timeout=120)
 
+    def upload_many(self, workspace_id: str, uploads: list[tuple[str, bytes, str | None]]):
+        files = [("files", (name, content, mime or "application/octet-stream")) for name, content, mime in uploads]
+        return self._request("POST", f"/workspaces/{workspace_id}/documents/batch", files=files, timeout=240)
+
     def ingestion_job(self, job_id: str):
         return self._request("GET", f"/ingestion/jobs/{job_id}")
 

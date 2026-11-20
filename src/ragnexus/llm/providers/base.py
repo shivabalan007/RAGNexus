@@ -10,6 +10,7 @@ class LLMResponse:
     model: str
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    retry_count: int = 0
 
 
 class ChatModel(Protocol):

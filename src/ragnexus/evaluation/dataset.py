@@ -14,9 +14,14 @@ class EvaluationCase:
     workspace_id: str | None = None
     document_ids: tuple[str, ...] = ()
     should_abstain: bool = False
-    relevant_source_names: tuple[str, ...] = ()
+    source_document: str | None = None
+    source_documents: tuple[str, ...] = ()
+    expected_source_ids: tuple[str, ...] = ()
+    evidence_quote: str | None = None
+    evidence_quotes: dict[str, str | list[str]] | None = None
     question_type: str | None = None
-    expected_facts: tuple[str, ...] = ()
+    mapping_status: str | None = None
+    prior_turns: tuple[dict, ...] = ()
 
 
 def load_jsonl(path: str | Path) -> list[EvaluationCase]:
@@ -27,8 +32,6 @@ def load_jsonl(path: str | Path) -> list[EvaluationCase]:
                 continue
             try:
                 raw = json.loads(line)
-                if raw.get("status") == "draft":
-                    continue
                 case = EvaluationCase(
                     case_id=str(raw["case_id"]),
                     query=str(raw["query"]),
@@ -37,14 +40,25 @@ def load_jsonl(path: str | Path) -> list[EvaluationCase]:
                     workspace_id=raw.get("workspace_id"),
                     document_ids=tuple(str(x) for x in raw.get("document_ids", [])),
                     should_abstain=bool(raw.get("should_abstain", False)),
-                    relevant_source_names=tuple(str(x) for x in raw.get("relevant_source_names", [])),
+                    source_document=raw.get("source_document"),
+                    source_documents=tuple(str(x) for x in raw.get("source_documents", [])),
+                    expected_source_ids=tuple(str(x) for x in raw.get("expected_source_ids", [])),
+                    evidence_quote=raw.get("evidence_quote"),
+                    evidence_quotes=raw.get("evidence_quotes"),
                     question_type=raw.get("question_type"),
-                    expected_facts=tuple(str(x) for x in raw.get("expected_facts", [])),
+                    mapping_status=raw.get("mapping_status"),
+                    prior_turns=tuple(raw.get("prior_turns", [])),
                 )
                 if not case.case_id or not case.query.strip():
                     raise ValueError("case_id and non-empty query are required")
-                if not case.should_abstain and not case.relevant_chunk_ids and not case.relevant_source_names:
-                    raise ValueError("non-abstention cases require relevant_chunk_ids or relevant_source_names")
+                # Real chunk UUIDs are assigned by the database during ingestion.
+                # Source-grounded benchmark records may be loaded before mapping.
+                if not case.should_abstain and not case.relevant_chunk_ids and not (case.source_document or case.source_documents):
+                    raise ValueError(
+                        "answerable cases require relevant_chunk_ids or a source_document awaiting chunk mapping"
+                    )
+                if case.should_abstain and case.relevant_chunk_ids:
+                    raise ValueError("unanswerable cases must not declare relevant_chunk_ids")
                 cases.append(case)
             except Exception as exc:
                 raise ValueError(f"Invalid evaluation dataset at line {line_number}: {exc}") from exc

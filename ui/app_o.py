@@ -33,14 +33,32 @@ st.markdown(
         color: #e8edf7;
     }
 
+    /* Keep app content below Streamlit's own header/Deploy toolbar. */
     [data-testid="stHeader"] {
-        background: rgba(11, 15, 25, .82);
+        background: rgba(11, 15, 25, .96);
+        min-height: 3.25rem;
+        z-index: 1000;
     }
 
-    .block-container {
+    [data-testid="stToolbar"] {
+        z-index: 1001;
+    }
+
+    .block-container,
+    [data-testid="stAppViewContainer"] .main .block-container {
         max-width: 1480px;
-        padding-top: 1.5rem;
+        /* Streamlit Cloud can overlay the top-right area with its Deploy control. */
+        padding-top: 5.25rem !important;
         padding-bottom: 2.5rem;
+    }
+
+    @media (max-width: 768px) {
+        .block-container,
+        [data-testid="stAppViewContainer"] .main .block-container {
+            padding-top: 4.25rem !important;
+            padding-left: 1rem;
+            padding-right: 1rem;
+        }
     }
 
     [data-testid="stSidebar"] {
@@ -288,7 +306,9 @@ def render_auth_page() -> None:
                     type="password",
                     placeholder="Enter your password",
                 )
+                confirm_password = None
                 if st.session_state.auth_mode == "Register":
+                    confirm_password = st.text_input("Confirm password", type="password", placeholder="Re-enter your password")
                     st.caption("Use a strong password of at least 12 characters.")
                 submitted = st.form_submit_button(
                     "Sign in" if st.session_state.auth_mode == "Login"
@@ -304,6 +324,9 @@ def render_auth_page() -> None:
                     return
                 if st.session_state.auth_mode == "Register" and len(password) < 12:
                     st.error("Use a password with at least 12 characters.")
+                    return
+                if st.session_state.auth_mode == "Register" and password != confirm_password:
+                    st.error("Password and confirmation do not match.")
                     return
                 try:
                     if st.session_state.auth_mode == "Register":
@@ -435,7 +458,7 @@ with st.sidebar:
     email = user.get("email") or "Signed-in user"
     st.caption("PROFILE")
     st.markdown(f"**{email}**")
-    if st.button("Open profile", use_container_width=True):
+    if st.button("👤  Profile", key="sidebar_profile_nav", use_container_width=True):
         st.session_state.page = "Profile"
         st.rerun()
     if st.button("Sign out", use_container_width=True):
@@ -488,62 +511,28 @@ def render_documents_page() -> None:
     st.divider()
     st.markdown("### Add documents")
     st.caption("Supported formats: PDF, TXT, CSV, DOCX and HTML.")
-    uploaded = st.file_uploader(
-        "Drop a file here or browse",
+    uploaded_files = st.file_uploader(
+        "Drop documents here or browse (select multiple files)",
         type=["pdf", "txt", "csv", "docx", "html", "htm"],
+        accept_multiple_files=True,
         key=f"document_upload_{workspace_id}",
     )
 
-    if uploaded and st.button("Upload and ingest", type="primary"):
+    if uploaded_files and st.button("Upload and ingest", type="primary"):
         try:
-            with st.spinner(f"Uploading {uploaded.name}..."):
-                result = api().upload(
-                    workspace_id,
-                    uploaded.name,
-                    uploaded.getvalue(),
-                    uploaded.type,
-                )
-            st.success(
-                f"Uploaded {result.get('filename', uploaded.name)}. "
-                f"Initial status: {result.get('status', 'queued')}."
-            )
-
-            job_id = result.get("ingestion_job_id")
-            if job_id:
-                progress = st.empty()
-                latest: dict[str, Any] | None = None
-                for attempt in range(45):
-                    latest = api().ingestion_job(str(job_id))
-                    job_status = str(latest.get("status", "unknown")).lower()
-                    progress.info(
-                        f"Ingestion: **{job_status}** · "
-                        f"Checking progress ({attempt + 1}/45)"
-                    )
-                    if job_status in ("completed", "indexed", "failed"):
-                        break
-                    time.sleep(2)
-
-                if latest:
-                    final_status = str(latest.get("status", "unknown")).lower()
-                    if final_status in ("completed", "indexed"):
-                        progress.success("Document ingestion completed.")
-                    elif final_status == "failed":
-                        reason = (
-                            latest.get("error_message")
-                            or latest.get("error_code")
-                            or "No failure details were returned by the API."
-                        )
-                        progress.error(f"Ingestion failed: {reason}")
-                    else:
-                        progress.warning(
-                            "The job is still running. Refresh the document list shortly."
-                        )
-            else:
-                st.warning(
-                    "Upload was accepted, but the API response did not include an "
-                    "ingestion job ID. Check the document status after refreshing."
-                )
-
+            payload = [(item.name, item.getvalue(), item.type) for item in uploaded_files]
+            with st.spinner(f"Submitting {len(payload)} document(s)..."):
+                batch = api().upload_many(workspace_id, payload)
+            for item in batch.get("results", []):
+                filename = item.get("filename") or "Document"
+                if item.get("duplicate"):
+                    st.info(f"{filename}: document already exists in this workspace; skipped duplicate ingestion.")
+                elif item.get("status") == "rejected":
+                    st.error(f"{filename}: {item.get('error', 'Upload rejected')}")
+                elif item.get("status") == "dispatch_failed":
+                    st.error(f"{filename}: saved, but queue dispatch failed. Check Redis/Celery.")
+                else:
+                    st.success(f"{filename}: accepted ({item.get('status', 'pending')}).")
             refresh_documents()
             st.rerun()
         except APIError as exc:
@@ -642,26 +631,85 @@ def render_citations(citations: list[dict[str, Any]]) -> None:
     with st.expander(f"Sources · {len(citations)}"):
         for cite in citations:
             source_no = cite.get("source_number", "?")
-            filename = cite.get("filename") or "Document"
-            st.markdown(f"**[{source_no}] {filename}**")
-            st.caption(f"Document: {cite.get('document_id', 'N/A')} · Chunk: {cite.get('chunk_id', 'N/A')}")
+            if cite.get("source_type") == "web":
+                title = cite.get("title") or "Web source"
+                url = cite.get("url") or ""
+                st.markdown(f"**[{source_no}] [{title}]({url})**")
+                st.caption("External web source · Verify the source before relying on it.")
+            else:
+                filename = cite.get("filename") or "Document"
+                st.markdown(f"**[{source_no}] {filename}**")
+                st.caption(f"Document: {cite.get('document_id', 'N/A')} · Chunk: {cite.get('chunk_id', 'N/A')}")
 
 def render_message_diagnostics(metadata: dict[str, Any]) -> None:
+    """Render one compact diagnostics panel directly below an answer's sources."""
     diagnostics = metadata.get("diagnostics") or {}
     if not diagnostics and not metadata.get("model"):
         return
+
+    def latency(value: Any) -> str:
+        if value is None:
+            return "N/A"
+        try:
+            return f"{float(value):.1f} ms"
+        except (TypeError, ValueError):
+            return "N/A"
+
     with st.expander("Answer details", expanded=False):
-        a, b, c, d = st.columns(4)
-        a.metric("Retrieved chunks", metadata.get("retrieved_count", 0))
-        b.metric("Latency", f"{metadata.get('latency_ms', 0):.0f} ms")
-        c.metric("Citations", diagnostics.get("citation_count", len(metadata.get("citations") or [])))
-        d.metric("Model", metadata.get("model") or "N/A")
-        x, y, z, w = st.columns(4)
-        x.metric("Dense", f"{diagnostics.get('dense_latency_ms', 0):.1f} ms")
-        y.metric("BM25", f"{diagnostics.get('bm25_latency_ms', 0):.1f} ms")
-        z.metric("Fusion", f"{diagnostics.get('fusion_latency_ms', 0):.1f} ms")
-        w.metric("Reranking", f"{diagnostics.get('rerank_latency_ms', 0):.1f} ms")
-        st.caption(f"Scope: {diagnostics.get('document_scope', 'unknown')} · Visibility: {diagnostics.get('visibility', 'unknown')}")
+        top = st.columns(4)
+        top[0].metric("Retrieval mode", diagnostics.get("retrieval_mode") or "N/A")
+        top[1].metric("Retrieved chunks", metadata.get("retrieved_count", 0))
+        top[2].metric("Citations", diagnostics.get("citation_count", len(metadata.get("citations") or [])))
+        top[3].metric("Reranking", "Applied" if diagnostics.get("reranking_applied") else "Not applied")
+
+        timing = st.columns(4)
+        timing[0].metric("Total latency", latency(metadata.get("latency_ms")))
+        timing[1].metric("Retrieval", latency(diagnostics.get("retrieval_latency_ms")))
+        timing[2].metric("Generation", latency(diagnostics.get("generation_latency_ms")))
+        timing[3].metric("Model", metadata.get("model") or "N/A")
+
+        stages = st.columns(4)
+        stages[0].metric("Dense search", latency(diagnostics.get("dense_latency_ms")))
+        stages[1].metric("BM25 search", latency(diagnostics.get("bm25_latency_ms")))
+        stages[2].metric("RRF fusion", latency(diagnostics.get("fusion_latency_ms")))
+        stages[3].metric("Reranking", latency(diagnostics.get("rerank_latency_ms")))
+
+        usage = st.columns(2)
+        usage[0].metric("Prompt tokens", metadata.get("prompt_tokens") if metadata.get("prompt_tokens") is not None else "N/A")
+        usage[1].metric("Completion tokens", metadata.get("completion_tokens") if metadata.get("completion_tokens") is not None else "N/A")
+
+        st.caption(
+            f"Scope: {diagnostics.get('document_scope', 'unknown')} · "
+            f"Visibility: {diagnostics.get('visibility', 'unknown')} · "
+            f"Reranker: {diagnostics.get('reranker_model') or 'not reported'} · "
+            f"Candidate K: {diagnostics.get('candidate_k', 'N/A')} · "
+            f"Final K: {diagnostics.get('final_k', 'N/A')}"
+        )
+
+        if diagnostics.get("historical_sources_removed"):
+            st.info(
+                "Some source chunks were deleted or superseded. Their citations and "
+                "evidence previews are hidden; the historical answer is retained."
+            )
+
+        chunks = diagnostics.get("retrieved_chunks") or []
+        if chunks:
+            st.markdown("**Retrieved evidence**")
+            for index, chunk in enumerate(chunks, start=1):
+                filename = chunk.get("filename") or "Document"
+                chunk_id = chunk.get("chunk_id") or "unknown"
+                st.markdown(
+                    f"{index}. **{filename}** · chunk `{chunk.get('chunk_index', 'N/A')}`"
+                )
+                st.caption(
+                    f"Chunk ID: {chunk_id} · "
+                    f"Dense: {chunk.get('dense_score') if chunk.get('dense_score') is not None else 'N/A'} · "
+                    f"BM25: {chunk.get('bm25_score') if chunk.get('bm25_score') is not None else 'N/A'} · "
+                    f"RRF: {chunk.get('rrf_score') if chunk.get('rrf_score') is not None else 'N/A'} · "
+                    f"Rerank: {chunk.get('rerank_score') if chunk.get('rerank_score') is not None else 'N/A'}"
+                )
+                if chunk.get("preview"):
+                    st.text(chunk["preview"])
 
 
 def render_chat_page() -> None:
@@ -692,6 +740,17 @@ def render_chat_page() -> None:
                 disabled=bool(st.session_state.session_id),
                 help="Workspace searches all eligible indexed documents. Selected searches only the documents you choose.",
             )
+
+        st.session_state.pipeline_mode = st.selectbox(
+            "RAG pipeline", ["standard", "agentic"],
+            index=1 if st.session_state.get("pipeline_mode", "standard") == "agentic" else 0,
+            format_func=lambda value: "Agentic RAG (LangGraph)" if value == "agentic" else "Standard RAG",
+            help="Standard runs the direct retrieval pipeline. Agentic runs the LangGraph routing, grading, corrective retrieval and verification workflow.",
+        )
+        st.session_state.enable_web_search = st.checkbox(
+            "Allow web search (Agentic RAG only)", value=bool(st.session_state.get("enable_web_search", False)),
+            help="External search is opt-in and requires TAVILY_API_KEY.",
+        )
 
         if st.session_state.document_scope == "selected":
             options = [str(d["id"]) for d in indexed_docs]
@@ -769,7 +828,11 @@ def render_chat_page() -> None:
 
             with st.chat_message("assistant"):
                 with st.spinner("Searching your documents and preparing an answer..."):
-                    result = api().send_message(session_id, query)
+                    result = api().send_message(
+                        session_id, query,
+                        pipeline_mode=st.session_state.get("pipeline_mode", "standard"),
+                        enable_web_search=bool(st.session_state.get("enable_web_search", False)),
+                    )
                 answer = result.get("answer") or "The API returned an empty answer."
                 st.markdown(answer)
                 citations = result.get("citations") or []
@@ -787,7 +850,10 @@ def render_chat_page() -> None:
                         "latency_ms": result.get("latency_ms", 0),
                         "model": result.get("model"),
                         "prompt_tokens": result.get("prompt_tokens"),
+                        "completion_tokens": result.get("completion_tokens"),
+                        "retry_count": result.get("retry_count", 0),
                         "diagnostics": result.get("diagnostics") or {},
+                        "pipeline_mode": st.session_state.get("pipeline_mode", "standard"),
                     },
                 }
             )
@@ -796,30 +862,13 @@ def render_chat_page() -> None:
         except APIError as exc:
             show_api_error(exc)
 
-    if st.session_state.last_chat_meta:
-        result = st.session_state.last_chat_meta
-        with st.expander("Answer details", expanded=False):
-            d = result.get("diagnostics") or {}
-            cols = st.columns(4)
-            cols[0].metric("Retrieved chunks", result.get("retrieved_count", 0))
-            cols[1].metric("Total latency", f"{result.get('latency_ms', 0):.0f} ms")
-            cols[2].metric("Citations", d.get("citation_count", len(result.get("citations") or [])))
-            cols[3].metric("Prompt tokens", result.get("prompt_tokens") or "N/A")
-            stage = st.columns(4)
-            stage[0].metric("Dense", f"{d.get('dense_latency_ms', 0):.1f} ms")
-            stage[1].metric("BM25", f"{d.get('bm25_latency_ms', 0):.1f} ms")
-            stage[2].metric("Fusion", f"{d.get('fusion_latency_ms', 0):.1f} ms")
-            stage[3].metric("Reranking", f"{d.get('rerank_latency_ms', 0):.1f} ms")
-            st.caption(f"Scope: {d.get('document_scope', 'unknown')} · Visibility: {d.get('visibility', 'unknown')} · Model: {result.get('model') or 'N/A'}")
-            st.caption("Timings are measured by the current request; model latency includes generation and other orchestration work.")
 
 
 def render_profile_page() -> None:
     st.markdown('<div class="rn-section-title">Your profile</div>', unsafe_allow_html=True)
     user = st.session_state.user or {}
     email = user.get("email", "Signed-in user")
-    initial = email[:1].upper() if email else "U"
-    st.markdown(f"<div class='rn-panel' style='display:flex;align-items:center;gap:18px'><div style='width:64px;height:64px;border-radius:50%;display:grid;place-items:center;background:linear-gradient(135deg,#6366f1,#06b6d4);font-size:26px;font-weight:800'>{initial}</div><div><div style='font-size:1.25rem;font-weight:750'>{email}</div><div class='rn-muted'>RAGNexus account</div></div></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='rn-panel'><div style='font-size:1.15rem;font-weight:750'>{email}</div><div class='rn-muted'>RAGNexus account</div></div>", unsafe_allow_html=True)
     st.write("")
     current = next((w for w in st.session_state.workspaces if str(w.get("id")) == str(st.session_state.workspace_id)), {})
     a, b, c = st.columns(3)

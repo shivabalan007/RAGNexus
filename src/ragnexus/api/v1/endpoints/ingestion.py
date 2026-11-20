@@ -1,12 +1,13 @@
 from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 from ragnexus.config import get_settings
 from ragnexus.dependencies import get_db, get_current_user
 from ragnexus.infrastructure.database.models.user import User
 from ragnexus.infrastructure.database.models.document import Document, DocumentChunk
+from ragnexus.infrastructure.database.models.conversation import SessionDocument
 from ragnexus.infrastructure.database.models.ingestion import IngestionJob
 from ragnexus.infrastructure.database.models.workspace import WorkspaceMember
 from ragnexus.application.ingestion.service import create_upload, WorkspaceAccessDenied
@@ -33,7 +34,6 @@ def upload_document(
             stream=file.file,
             storage=storage,
             max_bytes=settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024,
-            chunking_strategy=settings.CHUNKING_STRATEGY,
         )
     except WorkspaceAccessDenied:
         raise HTTPException(status_code=404, detail="Workspace not found")
@@ -43,6 +43,23 @@ def upload_document(
         raise HTTPException(status_code=400, detail=str(exc))
     finally:
         file.file.close()
+
+    if job is not None and job.status == "pending" and settings.INGESTION_QUEUE_BACKEND == "celery":
+        try:
+            from workers.tasks import enqueue_ingestion_job
+            enqueue_ingestion_job(job.id)
+        except Exception as exc:
+            # The DB job remains pending and can be recovered by the Celery
+            # reconciliation task or processed by the explicit DB fallback.
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Document was saved, but the ingestion job could not be "
+                    "published. Check Redis/Celery and retry queue dispatch; "
+                    f"job_id={job.id} ({type(exc).__name__})."
+                ),
+            ) from exc
+
     metadata = document.document_metadata or {}
     return DocumentUploadResponse(
         document_id=document.id,
@@ -54,6 +71,52 @@ def upload_document(
         duplicate=duplicate,
         ingestion_job_id=job.id if job else None,
     )
+
+
+@router.post("/workspaces/{workspace_id}/documents/batch", status_code=status.HTTP_202_ACCEPTED)
+def upload_documents_batch(
+    workspace_id: UUID,
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Accept multiple files and return an independent result for each file."""
+    if not files:
+        raise HTTPException(status_code=422, detail="Select at least one document")
+    settings = get_settings()
+    storage = build_document_storage(settings)
+    results = []
+    for upload in files:
+        try:
+            document, job, duplicate = create_upload(
+                db, workspace_id=workspace_id, user_id=current_user.id,
+                filename=upload.filename or "upload.bin", stream=upload.file,
+                storage=storage, max_bytes=settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024,
+            )
+            if job is not None and job.status == "pending" and settings.INGESTION_QUEUE_BACKEND == "celery":
+                try:
+                    from workers.tasks import enqueue_ingestion_job
+                    enqueue_ingestion_job(job.id)
+                except Exception as exc:
+                    results.append({"filename": upload.filename, "status": "dispatch_failed",
+                                    "duplicate": duplicate, "error": type(exc).__name__,
+                                    "document_id": str(document.id), "ingestion_job_id": str(job.id)})
+                    continue
+            results.append({"filename": document.filename,
+                            "status": "duplicate" if duplicate else document.status,
+                            "duplicate": duplicate, "document_id": str(document.id),
+                            "ingestion_job_id": str(job.id) if job else None})
+        except WorkspaceAccessDenied:
+            raise HTTPException(status_code=404, detail="Workspace not found")
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        except ValueError as exc:
+            results.append({"filename": upload.filename, "status": "rejected", "error": str(exc), "duplicate": False})
+        finally:
+            upload.file.close()
+    return {"results": results,
+            "accepted": sum(1 for r in results if r.get("status") not in {"rejected", "dispatch_failed"}),
+            "duplicates": sum(1 for r in results if r.get("duplicate"))}
 
 @router.get("/ingestion/jobs/{job_id}", response_model=IngestionJobResponse)
 def get_ingestion_job(
@@ -84,6 +147,16 @@ def list_documents(
     rows = db.scalars(select(Document).where(
         Document.workspace_id == workspace_id, Document.status != "deleted"
     ).order_by(Document.created_at.desc())).all()
+    chunk_counts = dict(db.execute(
+        select(DocumentChunk.document_id, func.count(DocumentChunk.id))
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(
+            Document.workspace_id == workspace_id,
+            Document.status == "indexed",
+            Document.document_metadata["is_current"].as_boolean().is_(True),
+        )
+        .group_by(DocumentChunk.document_id)
+    ).all())
     return [{
         "id": row.id,
         "filename": row.filename,
@@ -91,6 +164,11 @@ def list_documents(
         "content_hash": row.content_hash,
         "version_number": (row.document_metadata or {}).get("version_number", 1),
         "is_current": (row.document_metadata or {}).get("is_current", True),
+        # Count actual current indexed rows instead of trusting a UI estimate
+        # or a potentially stale metadata counter.
+        "indexed_chunk_count": int(chunk_counts.get(row.id, 0)) if row.status == "indexed" else 0,
+        "embedding_model": row.embedding_model,
+        "embedding_dimension": row.embedding_dimension,
         "file_size_bytes": row.file_size,
         "mime_type": row.mime_type,
         "created_at": row.created_at,
@@ -131,7 +209,11 @@ def delete_document(
             IngestionJob.document_id == document.id,
             IngestionJob.status.in_(["pending", "running"]),
         ).values(status="failed", error_code="DOCUMENT_DELETED",
-                 error_message="Document was deleted before ingestion completed."))
+                 error_message="Document was deleted before ingestion completed.",
+                 finished_at=datetime.now(timezone.utc)))
+        db.execute(delete(SessionDocument).where(
+            SessionDocument.document_id == document.id
+        ))
         db.query(DocumentChunk).filter(DocumentChunk.document_id == document.id).delete(synchronize_session=False)
         db.commit()
 
