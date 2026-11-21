@@ -41,10 +41,12 @@ def test_query_router_requires_user_opt_in_before_web_route():
     assert decision.reason == "web_search_not_enabled"
 
 
-def test_query_router_routes_freshness_and_explicit_web_requests_to_hybrid():
+def test_query_router_routes_freshness_to_hybrid_and_explicit_web_requests_to_web_only():
     router = QueryRouter(enabled=False)
     assert router.route_query("What is the latest ROS 2 release?", web_enabled=True).route == "hybrid"
-    assert router.route_query("Search the web for ROS 2 release notes", web_enabled=True).route == "hybrid"
+    explicit = router.route_query("Search the web for ROS 2 release notes", web_enabled=True)
+    assert explicit.route == "web"
+    assert explicit.reason == "user_explicitly_requested_web_only"
 
 
 def test_noop_cache_is_explicitly_disabled():
@@ -257,11 +259,17 @@ def test_agentic_generation_can_answer_from_web_only_evidence():
     from ragnexus.retrieval.result import RetrievalResult
 
     class FakeModel:
+        def __init__(self):
+            self.calls = 0
+
         def complete(self, *_args, **_kwargs):
-            return LLMResponse(
-                text="The release was announced in the official notes [1].",
-                model="test-model", prompt_tokens=100, completion_tokens=20,
+            self.calls += 1
+            text = (
+                "The release was announced in the official notes [1]."
+                if self.calls == 1
+                else '{"items":[{"segment":1,"source_numbers":[1]}]}'
             )
+            return LLMResponse(text=text, model="test-model", prompt_tokens=100, completion_tokens=20)
 
     workflow = object.__new__(AgenticRAGWorkflow)
     workflow.chat_model = FakeModel()
@@ -395,3 +403,75 @@ def test_document_list_endpoint_exposes_indexed_chunk_and_embedding_fields():
     assert result[0]["embedding_model"] == "all-MiniLM-L6-v2"
     assert result[0]["embedding_dimension"] == 384
     assert result[0]["file_size_bytes"] == 123456
+
+
+
+def test_agentic_explicit_web_route_searches_web_even_when_documents_are_sufficient():
+    from types import SimpleNamespace
+
+    from ragnexus.agentic.graph import AgenticRAGWorkflow
+
+    workflow = object.__new__(AgenticRAGWorkflow)
+    workflow.settings = SimpleNamespace(AGENTIC_MAX_RETRIES=2)
+    action = workflow._after_grade({
+        "route": "web",
+        "retrieval_sufficient": True,
+        "retry_count": 0,
+    })
+    assert action == "web"
+
+
+def test_agentic_web_only_route_does_not_cite_retrieved_documents():
+    from ragnexus.agentic.graph import AgenticRAGWorkflow
+    from ragnexus.llm.providers.base import LLMResponse
+    from ragnexus.retrieval.result import RetrievalResult, RetrievedChunk
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    class FakeModel:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, messages, **_kwargs):
+            self.calls += 1
+            prompt = messages[-1]["content"]
+            assert "Private internal document" not in prompt
+            if self.calls == 1:
+                assert "[SOURCE 1]" in prompt
+                text = "The public capital city is Bengaluru [1]."
+            else:
+                text = '{"items":[{"segment":1,"source_numbers":[1]}]}'
+            return LLMResponse(text=text, model="test-model", prompt_tokens=50, completion_tokens=10)
+
+    private_chunk = SimpleNamespace(
+        id=uuid4(), document_id=uuid4(), chunk_index=0,
+        content="Private internal document says the capital is another city.",
+        chunk_metadata={}, document=SimpleNamespace(filename="private.txt", document_metadata={}),
+    )
+    workflow = object.__new__(AgenticRAGWorkflow)
+    workflow.chat_model = FakeModel()
+    update = workflow._generate({
+        "route": "web",
+        "original_query": "Search the web for the capital of Karnataka",
+        "retrieval": RetrievalResult(
+            query="question", chunks=[RetrievedChunk(chunk=private_chunk)]
+        ),
+        "retrieval_sufficient": True,
+        "web_sources": [{
+            "title": "Public reference", "url": "https://example.com/karnataka",
+            "content": "Bengaluru is the capital city of Karnataka.",
+        }],
+        "history": [],
+    })
+    assert update["abstained"] is False
+    assert len(update["citations"]) == 1
+    assert update["citations"][0]["source_type"] == "web"
+
+
+
+def test_explicit_web_route_skips_document_retrieval_node():
+    from ragnexus.agentic.graph import AgenticRAGWorkflow
+
+    assert AgenticRAGWorkflow._after_route({"route": "web"}) == "web"
+    assert AgenticRAGWorkflow._after_route({"route": "hybrid"}) == "retrieve"
+    assert AgenticRAGWorkflow._after_route({"route": "documents"}) == "retrieve"

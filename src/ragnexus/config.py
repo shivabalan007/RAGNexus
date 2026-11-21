@@ -103,6 +103,9 @@ class Settings(BaseSettings):
     OLLAMA_API_KEY: SecretStr | None = None
     LLM_TIMEOUT_SECONDS: int = Field(default=45, ge=5, le=300)
     LLM_MAX_RETRIES: int = Field(default=2, ge=0, le=5)
+    # Local inference is slower and should not inherit cloud-provider retry timing.
+    OLLAMA_TIMEOUT_SECONDS: int = Field(default=180, ge=10, le=900)
+    OLLAMA_MAX_RETRIES: int = Field(default=0, ge=0, le=3)
 
     # OpenTelemetry is opt-in. Keep startup safe when telemetry is not configured.
     OTEL_ENABLED: bool = False

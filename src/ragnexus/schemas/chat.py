@@ -20,6 +20,7 @@ class ChatRequest(BaseModel):
     final_k: int = Field(default=5, ge=1, le=20)
     pipeline_mode: str = Field(default="standard", pattern="^(standard|agentic)$")
     enable_web_search: bool = False
+    request_id: UUID | None = None
 
 
 class CitationResponse(BaseModel):
@@ -28,6 +29,8 @@ class CitationResponse(BaseModel):
     document_id: str | None = None
     chunk_id: str | None = None
     chunk_index: int | None = None
+    supporting_chunk_ids: list[str] = Field(default_factory=list)
+    supporting_chunk_indices: list[int | None] = Field(default_factory=list)
     filename: str | None = None
     title: str | None = None
     url: str | None = None

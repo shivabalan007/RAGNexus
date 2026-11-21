@@ -61,8 +61,12 @@ class OpenAICompatibleChatModel:
             default_model = provider["default_model"]
 
         self.model_name = settings.LLM_MODEL or default_model
-        self.timeout = settings.LLM_TIMEOUT_SECONDS
-        self.max_retries = settings.LLM_MAX_RETRIES
+        if self.provider_name == "ollama":
+            self.timeout = settings.OLLAMA_TIMEOUT_SECONDS
+            self.max_retries = settings.OLLAMA_MAX_RETRIES
+        else:
+            self.timeout = settings.LLM_TIMEOUT_SECONDS
+            self.max_retries = settings.LLM_MAX_RETRIES
         self._client = None
 
     def _get_client(self):

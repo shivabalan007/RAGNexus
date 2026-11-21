@@ -5,9 +5,16 @@ import requests
 
 
 class APIError(RuntimeError):
-    def __init__(self, message: str, status_code: int | None = None):
+    def __init__(
+        self,
+        message: str,
+        status_code: int | None = None,
+        *,
+        timed_out: bool = False,
+    ):
         super().__init__(message)
         self.status_code = status_code
+        self.timed_out = timed_out
 
 
 class RAGNexusAPI:
@@ -33,6 +40,11 @@ class RAGNexusAPI:
                 method, url, headers=self._headers(),
                 timeout=kwargs.pop("timeout", self.timeout), **kwargs
             )
+        except requests.Timeout as exc:
+            raise APIError(
+                f"RAGNexus chat request timed out while waiting for the backend: {type(exc).__name__}",
+                timed_out=True,
+            ) from exc
         except requests.RequestException as exc:
             raise APIError(f"Cannot reach RAGNexus API at {self.base_url}: {type(exc).__name__}") from exc
 
@@ -102,18 +114,31 @@ class RAGNexusAPI:
     def chat_messages(self, session_id: str):
         return self._request("GET", f"/chat/sessions/{session_id}/messages")
 
-    def send_message(self, session_id: str, query: str, candidate_k: int = 20, final_k: int = 5, pipeline_mode: str = "standard", enable_web_search: bool = False):
+    def send_message(
+        self,
+        session_id: str,
+        query: str,
+        candidate_k: int = 20,
+        final_k: int = 5,
+        pipeline_mode: str = "standard",
+        enable_web_search: bool = False,
+        request_id: str | None = None,
+        timeout: int = 600,
+    ):
+        payload = {
+            "session_id": session_id,
+            "query": query,
+            "candidate_k": candidate_k,
+            "final_k": final_k,
+            "pipeline_mode": pipeline_mode,
+            "enable_web_search": enable_web_search,
+        }
+        if request_id:
+            payload["request_id"] = request_id
         return self._request(
             "POST", "/chat/messages",
-            json={
-                "session_id": session_id,
-                "query": query,
-                "candidate_k": candidate_k,
-                "final_k": final_k,
-                "pipeline_mode": pipeline_mode,
-                "enable_web_search": enable_web_search,
-            },
-            timeout=120,
+            json=payload,
+            timeout=timeout,
         )
 
     def chat_sessions(self, workspace_id: str, search: str = "", limit: int = 50, offset: int = 0):

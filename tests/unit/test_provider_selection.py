@@ -16,6 +16,8 @@ def settings(**overrides):
         "GROQ_API_KEY": None,
         "LLM_TIMEOUT_SECONDS": 45,
         "LLM_MAX_RETRIES": 2,
+        "OLLAMA_TIMEOUT_SECONDS": 180,
+        "OLLAMA_MAX_RETRIES": 0,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -26,6 +28,8 @@ def test_ollama_uses_openai_compatible_local_endpoint_without_cloud_key():
     assert model.base_url == "http://localhost:11434/v1"
     assert model.api_key == "ollama"
     assert model.model_name == "qwen2.5:7b"
+    assert model.timeout == 180
+    assert model.max_retries == 0
 
 
 def test_ollama_allows_generic_model_override():
@@ -42,6 +46,8 @@ def test_openrouter_keeps_existing_endpoint_and_key():
     assert model.base_url == "https://openrouter.ai/api/v1"
     assert model.api_key == "test-key"
     assert model.model_name == "custom/openrouter-model"
+    assert model.timeout == 45
+    assert model.max_retries == 2
 
 
 def test_provider_retries_transient_server_error(monkeypatch):
@@ -66,7 +72,10 @@ def test_provider_retries_transient_server_error(monkeypatch):
     class FakeClient:
         chat = SimpleNamespace(completions=FakeCompletions())
 
-    model = OpenAICompatibleChatModel(settings())
+    model = OpenAICompatibleChatModel(settings(
+        LLM_PROVIDER="openrouter",
+        OPENROUTER_API_KEY=SecretStr("test-key"),
+    ))
     monkeypatch.setattr(model, "_get_client", lambda: FakeClient())
     monkeypatch.setattr(openai_compatible, "sleep", lambda _seconds: None)
     result = model.complete([{"role": "user", "content": "hello"}])

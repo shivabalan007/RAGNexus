@@ -132,7 +132,10 @@ class RAGOrchestrationService:
         role: str,
         content: str,
         metadata: dict,
+        request_id: UUID | None = None,
     ) -> list[dict]:
+        if request_id is not None:
+            metadata = {**metadata, "client_request_id": str(request_id)}
         message = ConversationRepository.append_message(
             db, session_id=chat_session.id, role=role, content=content, metadata=metadata
         )
@@ -235,6 +238,8 @@ class RAGOrchestrationService:
             "agentic_retrieval_grading": settings.AGENTIC_ENABLE_RETRIEVAL_GRADING,
             "agentic_answer_verification": settings.AGENTIC_ENABLE_ANSWER_VERIFICATION,
             "web_search_enabled": bool(enable_web_search),
+            "citation_policy_version": "deterministic-evidence-mapping-v4",
+            "source_routing_policy_version": "explicit-web-only-v2",
             "tavily_search_depth": settings.TAVILY_SEARCH_DEPTH if enable_web_search else None,
             "tavily_max_results": settings.TAVILY_MAX_RESULTS if enable_web_search else None,
         })
@@ -263,6 +268,7 @@ class RAGOrchestrationService:
         history_cache_hit: bool,
         pipeline_mode: str,
         started: float,
+        request_id: UUID | None = None,
     ) -> ChatResponse | None:
         if not cache_key:
             return None
@@ -276,6 +282,7 @@ class RAGOrchestrationService:
             or not payload.get("answer", "").strip()
             or payload.get("abstained")
             or not isinstance(payload.get("citations"), list)
+            or not payload.get("citations")
         ):
             return None
 
@@ -283,6 +290,7 @@ class RAGOrchestrationService:
             db, chat_session=chat_session, user_id=user_id, history=history,
             role="user", content=query,
             metadata={"user_id": str(user_id), "pipeline_mode": pipeline_mode, "intent": IntentRouter.KNOWLEDGE},
+            request_id=request_id,
         )
         diagnostics = dict(payload.get("diagnostics") or {})
         diagnostics.update({
@@ -294,6 +302,14 @@ class RAGOrchestrationService:
             "retrieval_cache_hit": False,
             "retrieval_latency_ms": 0.0,
             "generation_latency_ms": 0.0,
+            "retrieval_latency_ms": 0.0,
+            "dense_latency_ms": 0.0,
+            "bm25_latency_ms": 0.0,
+            "fusion_latency_ms": 0.0,
+            "rerank_latency_ms": 0.0,
+            "stage_timings_ms": {},
+            "reranking_applied": False,
+            "retrieval_mode": "cached answer",
             "total_latency_ms": round((perf_counter() - started) * 1000, 2),
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -312,6 +328,7 @@ class RAGOrchestrationService:
                 "prompt_tokens": 0, "completion_tokens": 0,
                 "latency_ms": diagnostics["total_latency_ms"], "diagnostics": diagnostics,
             },
+            request_id=request_id,
         )
         return ChatResponse(
             session_id=str(chat_session.id), answer=answer, citations=citations,
@@ -337,7 +354,7 @@ class RAGOrchestrationService:
     ) -> None:
         # Only cache evidence-backed answers. Never cache abstentions or direct
         # memory/general responses, which are inherently context-dependent.
-        if not cache_key or abstained or not answer.strip():
+        if not cache_key or abstained or not answer.strip() or not citations:
             return
         try:
             self.cache.set(cache_key, {
@@ -372,12 +389,14 @@ class RAGOrchestrationService:
         pipeline_mode: str,
         intent: dict[str, str],
         started: float,
+        request_id: UUID | None = None,
     ) -> ChatResponse:
         intent_name = intent["intent"]
         cache_history = self._append_message(
             db, chat_session=chat_session, user_id=user_id, history=history,
             role="user", content=query,
             metadata={"user_id": str(user_id), "pipeline_mode": pipeline_mode, "intent": intent_name},
+            request_id=request_id,
         )
         model_name = None
         prompt_tokens = completion_tokens = None
@@ -441,6 +460,7 @@ class RAGOrchestrationService:
                 "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
                 "diagnostics": diagnostics,
             },
+            request_id=request_id,
         )
         return ChatResponse(
             session_id=str(chat_session.id), answer=answer, citations=[],
@@ -460,6 +480,7 @@ class RAGOrchestrationService:
         candidate_k: int = 20,
         final_k: int = 5,
         enable_web_search: bool = False,
+        request_id: UUID | None = None,
     ) -> ChatResponse:
         """Execute the existing LangGraph workflow within the same session security boundary."""
         started = perf_counter()
@@ -478,6 +499,7 @@ class RAGOrchestrationService:
                 db, chat_session=chat_session, user_id=user_id, query=normalized_query,
                 history=history, history_cache_hit=history_cache_hit,
                 pipeline_mode="agentic", intent=intent, started=started,
+                request_id=request_id,
             )
 
         document_ids = None
@@ -496,7 +518,7 @@ class RAGOrchestrationService:
         cached_response = self._reuse_cached_answer(
             db, cache_key=answer_cache_key, chat_session=chat_session, user_id=user_id,
             query=normalized_query, history=history, history_cache_hit=history_cache_hit,
-            pipeline_mode="agentic", started=started,
+            pipeline_mode="agentic", started=started, request_id=request_id,
         )
         if cached_response is not None:
             return cached_response
@@ -514,6 +536,7 @@ class RAGOrchestrationService:
             db, chat_session=chat_session, user_id=user_id, history=history,
             role="user", content=normalized_query,
             metadata={"user_id": str(user_id), "pipeline_mode": "agentic", "intent": intent["intent"]},
+            request_id=request_id,
         )
 
         from ragnexus.agentic.graph import AgenticRAGWorkflow
@@ -562,6 +585,7 @@ class RAGOrchestrationService:
             "intent_reason": intent.get("reason"),
             "execution_route": "agentic_graph",
             "route": state.get("route", "documents"),
+            "document_evidence_used": state.get("route") != "web",
             "retry_count": state.get("retry_count", 0),
             "verification": state.get("verification", {}),
             "web_source_count": len(state.get("web_sources") or []),
@@ -588,6 +612,7 @@ class RAGOrchestrationService:
                 for c in (retrieval.chunks or [])
             ],
             "citation_count": len(state.get("citations") or []),
+            "citation_validation_status": state.get("citation_validation_status", "not_reported"),
             "document_scope": chat_session.document_scope,
             "visibility": chat_session.visibility,
             "total_latency_ms": round((perf_counter() - started) * 1000, 2),
@@ -605,6 +630,7 @@ class RAGOrchestrationService:
                 "model": state.get("model"), "prompt_tokens": state.get("prompt_tokens"),
                 "completion_tokens": state.get("completion_tokens"), "diagnostics": diagnostics,
             },
+            request_id=request_id,
         )
         self._store_answer(
             answer_cache_key, query=normalized_query, answer=answer, citations=citations,
@@ -631,6 +657,7 @@ class RAGOrchestrationService:
         query: str,
         candidate_k: int = 20,
         final_k: int = 5,
+        request_id: UUID | None = None,
     ) -> ChatResponse:
         started = perf_counter()
         if not query or not query.strip():
@@ -648,6 +675,7 @@ class RAGOrchestrationService:
                 db, chat_session=chat_session, user_id=user_id, query=normalized_query,
                 history=history, history_cache_hit=history_cache_hit,
                 pipeline_mode="standard", intent=intent, started=started,
+                request_id=request_id,
             )
 
         selected_document_ids: list[UUID] | None = None
@@ -667,7 +695,7 @@ class RAGOrchestrationService:
         cached_response = self._reuse_cached_answer(
             db, cache_key=answer_cache_key, chat_session=chat_session, user_id=user_id,
             query=normalized_query, history=history, history_cache_hit=history_cache_hit,
-            pipeline_mode="standard", started=started,
+            pipeline_mode="standard", started=started, request_id=request_id,
         )
         if cached_response is not None:
             return cached_response
@@ -676,6 +704,7 @@ class RAGOrchestrationService:
             db, chat_session=chat_session, user_id=user_id, history=history,
             role="user", content=normalized_query,
             metadata={"user_id": str(user_id), "pipeline_mode": "standard", "intent": intent["intent"]},
+            request_id=request_id,
         )
         standalone_query = self.followup_resolver.resolve(normalized_query, history)
         if chat_session.document_scope == "selected":
@@ -708,11 +737,13 @@ class RAGOrchestrationService:
             generation_started = perf_counter()
             generated = self.chat_model.complete(messages, temperature=0.2, max_tokens=1400)
             generation_latency_ms = (perf_counter() - generation_started) * 1000
-            answer, citations = validate_citations(generated.text, retrieval)
-            if not answer:
-                answer = self.ABSTENTION
-                citations = []
-                abstained = True
+            answer, citations = validate_citations(generated.text, retrieval, [])
+            # Citation matching is deliberately non-destructive. A source
+            # attribution miss must not turn a valid model answer into an
+            # abstention; it only means that no citation can be displayed.
+            if not answer.strip():
+                answer = generated.text.strip() or self.ABSTENTION
+            abstained = not bool(generated.text.strip())
             model_name = generated.model
             prompt_tokens = generated.prompt_tokens
             completion_tokens = generated.completion_tokens
@@ -758,6 +789,7 @@ class RAGOrchestrationService:
             "document_scope": chat_session.document_scope,
             "visibility": chat_session.visibility,
             "citation_count": len(citations),
+            "citation_validation_status": "matched" if citations else ("no_supporting_source" if not abstained else "not_applicable"),
             "retrieval_cache_hit": bool(getattr(retrieval, "cache_hit", False)),
             "conversation_cache_hit": history_cache_hit,
             "web_search_attempted": False,
@@ -773,6 +805,7 @@ class RAGOrchestrationService:
                 "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
                 "diagnostics": diagnostics,
             },
+            request_id=request_id,
         )
         self._store_answer(
             answer_cache_key, query=normalized_query, answer=answer, citations=citations,

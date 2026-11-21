@@ -6,13 +6,90 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from ragnexus.dependencies import get_db
 from ragnexus.memory.repository import ConversationNotFound, ConversationRepository
 from ragnexus.infrastructure.database.models.document import Document, DocumentChunk
+from ragnexus.infrastructure.database.models.conversation import Message
 from ragnexus.rag.orchestration.service import RAGOrchestrationService
+from ragnexus.rag.orchestration.citations import filter_active_citations
 from ragnexus.schemas.chat import ChatRequest, ChatResponseSchema, CreateSessionRequest
+
+
+
+
+def _find_idempotent_chat_response(db: Session, *, session_id: UUID, request_id: UUID):
+    rows = db.scalars(
+        select(Message)
+        .where(
+            Message.session_id == session_id,
+            Message.message_metadata["client_request_id"].as_string() == str(request_id),
+        )
+        .order_by(Message.created_at.asc(), Message.id.asc())
+    ).all()
+    assistant = next((row for row in reversed(rows) if row.role == "assistant"), None)
+    if assistant is None:
+        if rows:
+            raise HTTPException(
+                status_code=409,
+                detail="This chat request has already started and is still pending or failed. "
+                       "Refresh the conversation before submitting it again.",
+            )
+        return None
+
+    metadata = assistant.message_metadata or {}
+    diagnostics = metadata.get("diagnostics") or {}
+    user_message = next((row for row in rows if row.role == "user"), None)
+    return {
+        "session_id": str(session_id),
+        "answer": assistant.content,
+        "citations": metadata.get("citations") or [],
+        "rewritten_query": metadata.get("rewritten_query") or (
+            user_message.content if user_message is not None else ""
+        ),
+        "retrieved_count": int(metadata.get("retrieved_count") or 0),
+        "abstained": bool(metadata.get("abstained", False)),
+        "latency_ms": float(metadata.get("latency_ms") or diagnostics.get("total_latency_ms") or 0),
+        "model": metadata.get("model"),
+        "prompt_tokens": metadata.get("prompt_tokens"),
+        "completion_tokens": metadata.get("completion_tokens"),
+        "retry_count": int(metadata.get("retry_count") or diagnostics.get("retry_count") or 0),
+        "diagnostics": diagnostics,
+    }
+
+
+def _acquire_request_lock(db: Session, *, session_id: UUID, request_id: UUID):
+    """Hold a PostgreSQL session advisory lock across internal DB commits."""
+    bind = db.get_bind()
+    if getattr(getattr(bind, "dialect", None), "name", None) != "postgresql":
+        return None, None
+    connection = bind.connect()
+    lock_key = f"ragnexus-chat:{session_id}:{request_id}"
+    try:
+        connection.execute(
+            text("SELECT pg_advisory_lock(hashtextextended(:lock_key, 0))"),
+            {"lock_key": lock_key},
+        )
+        connection.commit()
+        return connection, lock_key
+    except Exception:
+        connection.close()
+        raise
+
+
+def _release_request_lock(connection, lock_key: str | None) -> None:
+    if connection is None or not lock_key:
+        return
+    try:
+        connection.execute(
+            text("SELECT pg_advisory_unlock(hashtextextended(:lock_key, 0))"),
+            {"lock_key": lock_key},
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
 
 def create_chat_router(*, get_current_user: Callable, orchestration: RAGOrchestrationService) -> APIRouter:
     router = APIRouter(prefix="/chat", tags=["Chat"])
@@ -89,12 +166,13 @@ def create_chat_router(*, get_current_user: Callable, orchestration: RAGOrchestr
                 retrieved = diagnostics.get("retrieved_chunks") or []
                 original_by_message[str(row.id)] = (citations, retrieved)
                 for item in [*citations, *retrieved]:
-                    raw_chunk_id = item.get("chunk_id")
-                    if raw_chunk_id:
-                        try:
-                            chunk_ids.add(UUID(str(raw_chunk_id)))
-                        except (TypeError, ValueError):
-                            continue
+                    raw_ids = [item.get("chunk_id"), *(item.get("supporting_chunk_ids") or [])]
+                    for raw_chunk_id in raw_ids:
+                        if raw_chunk_id:
+                            try:
+                                chunk_ids.add(UUID(str(raw_chunk_id)))
+                            except (TypeError, ValueError):
+                                continue
 
             valid_pairs = set()
             if chunk_ids:
@@ -116,13 +194,7 @@ def create_chat_router(*, get_current_user: Callable, orchestration: RAGOrchestr
                 metadata = dict(row.message_metadata or {})
                 original_citations, original_retrieved = original_by_message[str(row.id)]
 
-                valid_citations = [
-                    citation for citation in original_citations
-                    if (
-                        str(citation.get("chunk_id")),
-                        str(citation.get("document_id")),
-                    ) in valid_pairs
-                ]
+                valid_citations = filter_active_citations(original_citations, valid_pairs)
                 valid_retrieved = [
                     item for item in original_retrieved
                     if (
@@ -131,7 +203,7 @@ def create_chat_router(*, get_current_user: Callable, orchestration: RAGOrchestr
                     ) in valid_pairs
                 ]
                 removed = (
-                    len(valid_citations) != len(original_citations)
+                    valid_citations != original_citations
                     or len(valid_retrieved) != len(original_retrieved)
                 )
 
@@ -143,10 +215,14 @@ def create_chat_router(*, get_current_user: Callable, orchestration: RAGOrchestr
                 diagnostics["citation_count"] = len(valid_citations)
                 if removed:
                     diagnostics["historical_sources_removed"] = True
+                    valid_source_numbers = {
+                        citation.get("source_number") for citation in valid_citations
+                    }
                     invalid_numbers = {
                         citation.get("source_number")
                         for citation in original_citations
-                        if citation not in valid_citations and citation.get("source_number") is not None
+                        if citation.get("source_number") is not None
+                        and citation.get("source_number") not in valid_source_numbers
                     }
                     content = row.content
                     for number in invalid_numbers:
@@ -167,7 +243,22 @@ def create_chat_router(*, get_current_user: Callable, orchestration: RAGOrchestr
 
     @router.post("/messages", response_model=ChatResponseSchema)
     def send_message(payload: ChatRequest, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+        lock_connection = None
+        lock_key = None
         try:
+            ConversationRepository.get_authorized_session(
+                db, session_id=payload.session_id, user_id=current_user.id
+            )
+            if payload.request_id is not None:
+                lock_connection, lock_key = _acquire_request_lock(
+                    db, session_id=payload.session_id, request_id=payload.request_id
+                )
+                existing = _find_idempotent_chat_response(
+                    db, session_id=payload.session_id, request_id=payload.request_id
+                )
+                if existing is not None:
+                    return existing
+
             if payload.pipeline_mode == "agentic":
                 agentic_chat = getattr(orchestration, "agentic_chat", None)
                 if not callable(agentic_chat):
@@ -176,11 +267,13 @@ def create_chat_router(*, get_current_user: Callable, orchestration: RAGOrchestr
                     db, user_id=current_user.id, session_id=payload.session_id,
                     query=payload.query, candidate_k=payload.candidate_k,
                     final_k=payload.final_k, enable_web_search=payload.enable_web_search,
+                    request_id=payload.request_id,
                 )
             else:
                 result = orchestration.chat(
                     db, user_id=current_user.id, session_id=payload.session_id,
                     query=payload.query, candidate_k=payload.candidate_k, final_k=payload.final_k,
+                    request_id=payload.request_id,
                 )
             return result.to_dict()
         except ConversationNotFound:
@@ -189,5 +282,7 @@ def create_chat_router(*, get_current_user: Callable, orchestration: RAGOrchestr
             raise HTTPException(status_code=422, detail=str(exc))
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc))
+        finally:
+            _release_request_lock(lock_connection, lock_key)
 
     return router

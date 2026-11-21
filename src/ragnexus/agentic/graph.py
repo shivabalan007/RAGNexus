@@ -38,6 +38,7 @@ class AgentState(TypedDict, total=False):
     completion_tokens: int | None
     generation_latency_ms: float | None
     generation_attempted: bool
+    citation_validation_status: str
     verification: dict
     retrieval_sufficient: bool
     diagnostics: dict
@@ -80,7 +81,11 @@ class AgenticRAGWorkflow:
         graph.add_node("generate", self._timed_node("generation", self._generate))
         graph.add_node("verify", self._timed_node("verification", self._verify))
         graph.add_edge(START, "route")
-        graph.add_edge("route", "retrieve")
+        graph.add_conditional_edges(
+            "route",
+            self._after_route,
+            {"web": "web_search", "retrieve": "retrieve"},
+        )
         graph.add_edge("retrieve", "grade")
         graph.add_conditional_edges(
             "grade",
@@ -119,7 +124,7 @@ class AgenticRAGWorkflow:
             web_enabled=bool(state.get("enable_web_search")),
         )
         return {
-            "route": "hybrid" if decision.route == "hybrid" else "documents",
+            "route": decision.route if decision.route in {"web", "hybrid"} else "documents",
             "diagnostics": {
                 **(state.get("diagnostics") or {}),
                 "route_reason": decision.reason,
@@ -127,6 +132,11 @@ class AgenticRAGWorkflow:
                 "web_search_enabled": bool(state.get("enable_web_search")),
             },
         }
+
+    @staticmethod
+    def _after_route(state: AgentState) -> str:
+        # Explicit web-search requests are web-only: do not run document retrieval.
+        return "web" if state.get("route") == "web" else "retrieve"
 
     def _retrieve(self, state: AgentState) -> dict:
         result = self.retrieval_service.search(
@@ -183,7 +193,7 @@ class AgenticRAGWorkflow:
         # A HYBRID source plan means web evidence is required even when local
         # retrieval is already sufficient. Search now instead of waiting for
         # corrective retries; document evidence remains in the final prompt.
-        if state.get("route") == "hybrid":
+        if state.get("route") in {"web", "hybrid"}:
             return "web"
         retrieval = state.get("retrieval")
         sufficient = bool(state.get("retrieval_sufficient", retrieval and retrieval.evidence_sufficient))
@@ -208,7 +218,10 @@ class AgenticRAGWorkflow:
         if (
             bool(state.get("enable_web_search"))
             and not bool(state.get("web_search_attempted"))
-            and bool(state.get("abstained"))
+            and (
+                bool(state.get("abstained"))
+                or state.get("citation_validation_status") == "no_supporting_source"
+            )
         ):
             return "web"
         return "verify"
@@ -281,29 +294,45 @@ class AgenticRAGWorkflow:
     def _generate(self, state: AgentState) -> dict:
         retrieval = state.get("retrieval") or RetrievalResult(query=state["original_query"])
         web_sources = state.get("web_sources") or []
-        evidence_sufficient = bool(state.get("retrieval_sufficient", retrieval.evidence_sufficient))
-        if (not retrieval.has_documents() or not evidence_sufficient) and not web_sources:
+        # An explicit "search the web" request is a web-only source plan. Keep
+        # document retrieval diagnostics, but do not expose private document
+        # chunks to generation, citation numbering, or answer verification.
+        answer_retrieval = (
+            RetrievalResult(query=state["original_query"])
+            if state.get("route") == "web"
+            else retrieval
+        )
+        # Retrieval grading is a routing hint, not a hard answer gate. Small
+        # local models can grade relevant evidence as insufficient. If chunks
+        # exist, let the answer model inspect them and decide whether it can
+        # answer; only skip generation when there is no evidence at all.
+        if not answer_retrieval.has_documents() and not web_sources:
             return {
                 "answer": "The available documents and web search did not provide enough evidence to answer this question.",
                 "citations": [], "abstained": True, "model": None,
                 "prompt_tokens": None, "completion_tokens": None,
                 "generation_latency_ms": None, "generation_attempted": False,
+                "citation_validation_status": "not_applicable",
             }
         messages = build_rag_messages(
-            query=state["original_query"], retrieval=retrieval,
+            query=state["original_query"], retrieval=answer_retrieval,
             history=state.get("history", []), web_sources=web_sources,
         )
         started = perf_counter()
         generated = self.chat_model.complete(messages, temperature=0.2, max_tokens=1400)
         generation_latency_ms = (perf_counter() - started) * 1000
-        answer, citations = validate_citations(generated.text, retrieval, web_sources)
+        answer, citations = validate_citations(
+            generated.text, answer_retrieval, web_sources
+        )
+        # Preserve the generated answer when provenance matching is uncertain.
+        # Citation failure is diagnostic; it is not an answer-generation failure.
         if not answer.strip():
-            answer = "The available evidence does not provide enough information to answer this question."
-            citations = []
+            answer = generated.text.strip()
         return {
             "answer": answer,
             "citations": citations,
-            "abstained": not bool(citations),
+            "abstained": not bool(answer.strip()),
+            "citation_validation_status": "matched" if citations else "no_supporting_source",
             "model": generated.model,
             "prompt_tokens": generated.prompt_tokens,
             "completion_tokens": generated.completion_tokens,
@@ -315,17 +344,20 @@ class AgenticRAGWorkflow:
         if not self.settings.AGENTIC_ENABLE_ANSWER_VERIFICATION:
             return {"verification": {"status": "disabled", "verified": None}}
         retrieval = state.get("retrieval") or RetrievalResult(query=state["original_query"])
-        evidence = [item.context_content for item in retrieval.chunks]
+        verification_retrieval = (
+            RetrievalResult(query=state["original_query"])
+            if state.get("route") == "web"
+            else retrieval
+        )
+        evidence = [item.context_content for item in verification_retrieval.chunks]
         evidence.extend(str(item.get("content", "")) for item in state.get("web_sources", []))
         verification = self.verifier.verify(
             question=state["original_query"], answer=state.get("answer", ""),
             evidence_text="\n\n".join(evidence),
         )
-        if verification.get("verified") is False:
-            return {
-                "answer": "The retrieved evidence was not sufficient to verify a reliable answer. Please refine the question or provide a more relevant source.",
-                "citations": [], "abstained": True, "verification": verification,
-            }
+        # Verification is advisory. A verifier false-negative must not erase a
+        # generated answer, especially with compact local models. Keep the
+        # result visible in diagnostics so it can be evaluated separately.
         return {"verification": verification}
 
     def invoke(

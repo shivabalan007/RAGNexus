@@ -22,9 +22,9 @@ class RoutingResult:
 class QueryRouter:
     """Select document or external evidence sources without score guessing.
 
-    Web is always gated by the user's per-request opt-in. Explicit web requests
-    and freshness-sensitive queries are routed to HYBRID; other queries may be
-    classified by the configured chat model.
+    Web is always gated by the user's per-request opt-in. Explicit web-only
+    requests use WEB; freshness-sensitive queries and model-selected external
+    research use HYBRID so uploaded documents can still contribute.
     """
 
     _EXPLICIT_WEB = re.compile(
@@ -45,7 +45,7 @@ class QueryRouter:
             return RoutingResult(Route.DOCUMENT.value, "web_search_not_enabled")
         text = (query or "").strip()
         if self._EXPLICIT_WEB.search(text):
-            return RoutingResult(Route.HYBRID.value, "user_explicitly_requested_web_search")
+            return RoutingResult(Route.WEB.value, "user_explicitly_requested_web_only")
         if self._FRESHNESS.search(text):
             return RoutingResult(Route.HYBRID.value, "freshness_sensitive_query")
         if not self.enabled or self.chat_model is None:

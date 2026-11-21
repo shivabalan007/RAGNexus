@@ -22,3 +22,12 @@ def test_chat_request_accepts_agentic_pipeline_and_opt_in_web_search():
 def test_chat_request_rejects_unknown_pipeline():
     with pytest.raises(ValidationError):
         ChatRequest(session_id="8e9b4e63-25d1-4f16-b75d-7d55e2d9632d", query="hello", pipeline_mode="magic")
+
+
+def test_chat_request_accepts_idempotency_request_id():
+    request = ChatRequest(
+        session_id="8e9b4e63-25d1-4f16-b75d-7d55e2d9632d",
+        query="hello",
+        request_id="2c1a0db7-5a64-4b2f-9d90-7f0c5db7d6b4",
+    )
+    assert str(request.request_id) == "2c1a0db7-5a64-4b2f-9d90-7f0c5db7d6b4"

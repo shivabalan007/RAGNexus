@@ -4,6 +4,7 @@ import os
 import time
 import html
 from typing import Any
+from uuid import uuid4
 
 import streamlit as st
 
@@ -279,6 +280,8 @@ def init_state() -> None:
         "selected_document_ids": [],
         "history_search": "",
         "profile_loaded": False,
+        "pending_chat_request_id": None,
+        "pending_chat_query": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -286,6 +289,14 @@ def init_state() -> None:
 
 
 init_state()
+
+
+def chat_request_timeout() -> int:
+    try:
+        configured = int(os.getenv("RAGNEXUS_CHAT_TIMEOUT_SECONDS", "600"))
+    except (TypeError, ValueError):
+        configured = 600
+    return max(120, min(configured, 1800))
 
 
 def api() -> RAGNexusAPI:
@@ -302,6 +313,8 @@ def reset_chat() -> None:
     st.session_state.session_id = None
     st.session_state.messages = []
     st.session_state.last_chat_meta = None
+    st.session_state.pending_chat_request_id = None
+    st.session_state.pending_chat_query = None
 
 
 def clear_auth() -> None:
@@ -687,8 +700,8 @@ def create_session_if_needed() -> str:
     return st.session_state.session_id
 
 
-def load_chat_history() -> None:
-    if st.session_state.session_id and not st.session_state.messages:
+def load_chat_history(*, force: bool = False) -> None:
+    if st.session_state.session_id and (force or not st.session_state.messages):
         history = api().chat_messages(st.session_state.session_id) or []
         st.session_state.messages = [
             {
@@ -699,6 +712,22 @@ def load_chat_history() -> None:
             for message in history
             if message.get("role") in ("user", "assistant")
         ]
+        pending_id = st.session_state.get("pending_chat_request_id")
+        if pending_id and any(
+            message["role"] == "assistant"
+            and (message.get("metadata") or {}).get("client_request_id") == pending_id
+            for message in st.session_state.messages
+        ):
+            st.session_state.pending_chat_request_id = None
+            st.session_state.pending_chat_query = None
+        elif st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
+            # Also recover the pending state after a browser refresh, when
+            # Streamlit's in-memory request ID may no longer be available.
+            last_user_meta = st.session_state.messages[-1].get("metadata") or {}
+            recovered_id = last_user_meta.get("client_request_id")
+            if recovered_id:
+                st.session_state.pending_chat_request_id = recovered_id
+                st.session_state.pending_chat_query = st.session_state.messages[-1]["content"]
 
 
 def render_citations(citations: list[dict[str, Any]]) -> None:
@@ -716,6 +745,9 @@ def render_citations(citations: list[dict[str, Any]]) -> None:
                 filename = cite.get("filename") or "Document"
                 st.markdown(f"**[{source_no}] {filename}**")
                 st.caption(f"Document: {cite.get('document_id', 'N/A')} · Chunk: {cite.get('chunk_id', 'N/A')}")
+                supporting_chunks = cite.get("supporting_chunk_ids") or []
+                if len(supporting_chunks) > 1:
+                    st.caption("Additional supporting chunks: " + ", ".join(supporting_chunks[1:]))
 
 def render_message_diagnostics(metadata: dict[str, Any]) -> None:
     """Render compact, per-message pipeline diagnostics with seconds as the display unit."""
@@ -748,7 +780,11 @@ def render_message_diagnostics(metadata: dict[str, Any]) -> None:
     model = metadata.get("model") or "N/A"
     retrieved = metadata.get("retrieved_count", 0)
     citations = diagnostics.get("citation_count", len(metadata.get("citations") or []))
-    reranking = "Applied" if diagnostics.get("reranking_applied") else "Not applied"
+    reranking = (
+        "Cached" if diagnostics.get("answer_cache_hit")
+        else "Applied" if diagnostics.get("reranking_applied")
+        else "Not applied"
+    )
 
     with st.expander("Answer details", expanded=False):
         badge_class = "agentic" if pipeline == "agentic" else "standard"
@@ -783,7 +819,7 @@ def render_message_diagnostics(metadata: dict[str, Any]) -> None:
             if stage_tiles:
                 st.markdown("**Agentic stage timings**")
                 st.markdown(f'<div class="rn-metrics-grid">{stage_tiles}</div>', unsafe_allow_html=True)
-        else:
+        elif not diagnostics.get("answer_cache_hit"):
             stage_values = [
                 ("Dense search", diagnostics.get("dense_latency_ms")),
                 ("BM25 search", diagnostics.get("bm25_latency_ms")),
@@ -841,7 +877,11 @@ def render_message_diagnostics(metadata: dict[str, Any]) -> None:
 
         chunks = diagnostics.get("retrieved_chunks") or []
         if chunks:
-            st.markdown(f"**Retrieved evidence · {len(chunks)} chunks**")
+            if diagnostics.get("route") == "web" or diagnostics.get("document_evidence_used") is False:
+                evidence_label = "Retrieved document chunks · not used to generate this web-only answer"
+            else:
+                evidence_label = "Retrieved document evidence"
+            st.markdown(f"**{evidence_label} · {len(chunks)} chunks**")
             for index, chunk in enumerate(chunks, start=1):
                 filename = chunk.get("filename") or "Document"
                 chunk_id = chunk.get("chunk_id") or "unknown"
@@ -924,7 +964,7 @@ def render_chat_page() -> None:
         )
 
     try:
-        load_chat_history()
+        load_chat_history(force=bool(st.session_state.get("pending_chat_request_id")))
     except APIError as exc:
         show_api_error(exc)
 
@@ -960,14 +1000,29 @@ def render_chat_page() -> None:
                 if message["role"] == "assistant":
                     message_meta = message.get("metadata") or {}
                     render_citations(message_meta.get("citations") or [])
+                    if (message_meta.get("diagnostics") or {}).get("citation_validation_status") == "no_supporting_source":
+                        st.warning("The answer was generated, but no retrieved source could be confidently attached as a citation.")
                     render_message_diagnostics(message_meta)
 
-    query = st.chat_input("Message RAGNexus...")
-    if query:
+    pending_request_id = st.session_state.get("pending_chat_request_id")
+    if pending_request_id:
+        st.info(
+            "A previous request is still pending. RAGNexus is checking the saved conversation "
+            "for its response. Please do not submit the same question again."
+        )
+
+    query = st.chat_input(
+        "Message RAGNexus...",
+        disabled=bool(pending_request_id),
+    )
+    if query and not pending_request_id:
+        request_id = str(uuid4())
         try:
             session_id = create_session_if_needed()
+            st.session_state.pending_chat_request_id = request_id
+            st.session_state.pending_chat_query = query
             st.session_state.messages.append(
-                {"role": "user", "content": query, "metadata": {}}
+                {"role": "user", "content": query, "metadata": {"client_request_id": request_id}}
             )
             with history_area:
                 with st.chat_message("user"):
@@ -979,6 +1034,8 @@ def render_chat_page() -> None:
                             session_id, query,
                             pipeline_mode=selected_pipeline,
                             enable_web_search=bool(st.session_state.get("enable_web_search", False)),
+                            request_id=request_id,
+                            timeout=chat_request_timeout(),
                         )
                     answer = result.get("answer") or "The API returned an empty answer."
                     st.markdown(answer)
@@ -994,17 +1051,52 @@ def render_chat_page() -> None:
                         "retry_count": result.get("retry_count", 0),
                         "diagnostics": result.get("diagnostics") or {},
                         "pipeline_mode": (result.get("diagnostics") or {}).get("pipeline_mode") or selected_pipeline,
+                        "client_request_id": request_id,
                     }
                     if result.get("abstained"):
                         st.info("I couldn't find sufficient supporting evidence in the selected documents.")
+                    elif (result.get("diagnostics") or {}).get("citation_validation_status") == "no_supporting_source":
+                        st.warning("The answer was generated, but no retrieved source could be confidently attached as a citation.")
                     render_message_diagnostics(response_metadata)
 
             st.session_state.messages.append(
                 {"role": "assistant", "content": answer, "metadata": response_metadata}
             )
             st.session_state.last_chat_meta = result
+            st.session_state.pending_chat_request_id = None
+            st.session_state.pending_chat_query = None
         except APIError as exc:
-            show_api_error(exc)
+            if exc.timed_out:
+                try:
+                    load_chat_history(force=True)
+                    matching_messages = [
+                        message for message in st.session_state.messages
+                        if (message.get("metadata") or {}).get("client_request_id") == request_id
+                    ]
+                    recovered = any(message["role"] == "assistant" for message in matching_messages)
+                    request_was_persisted = bool(matching_messages)
+                    if recovered:
+                        st.success("The backend completed the request. The saved answer has been recovered.")
+                        st.rerun()
+                    if not request_was_persisted:
+                        st.session_state.pending_chat_request_id = None
+                        st.session_state.pending_chat_query = None
+                        st.error(
+                            "The request was not recorded by the backend. You can submit the question again."
+                        )
+                    else:
+                        st.warning(
+                            "The UI stopped waiting, but the backend may still be processing your request. "
+                            "Your request ID is retained; refresh this conversation later to load the saved answer. "
+                            "Do not submit the same question again."
+                        )
+                except APIError:
+                    st.warning(
+                        "The chat request timed out and the history check also failed. "
+                        "Your request ID is retained so the same request is not submitted twice."
+                    )
+            else:
+                show_api_error(exc)
 
 
 
