@@ -103,7 +103,7 @@ tmp/
 
 # Model and cache artifacts
 .cache/
-models/
+/models/
 *.pkl
 *.index
 *.pt
