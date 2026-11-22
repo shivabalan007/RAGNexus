@@ -38,6 +38,7 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/2
       DOCUMENT_STORAGE_DIR: /app/data/documents
       PYTHONPATH: /app/src
+      HF_HOME: /models
     command: ["sh", "-c", "alembic upgrade head && uvicorn ragnexus.main:app --host 0.0.0.0 --port 8000"]
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -45,13 +46,14 @@ services:
       - "8000:8000"
     volumes:
       - document_data:/app/data/documents
+      - hf_cache:/models
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=3)"]
       interval: 20s
       timeout: 5s
       retries: 10
@@ -68,9 +70,11 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/2
       DOCUMENT_STORAGE_DIR: /app/data/documents
       PYTHONPATH: /app/src
+      HF_HOME: /models
     command: ["celery", "-A", "workers.celery_app:celery_app", "worker", "--loglevel=INFO", "--concurrency=1"]
     volumes:
       - document_data:/app/data/documents
+      - hf_cache:/models
     depends_on:
       api:
         condition: service_healthy
@@ -101,7 +105,10 @@ services:
     env_file: .env
     environment:
       RAGNEXUS_API_URL: http://api:8000/api/v1
+      HF_HOME: /models
     command: ["streamlit", "run", "ui/app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+    volumes:
+      - hf_cache:/models
     ports:
       - "8501:8501"
     depends_on:
@@ -112,3 +119,4 @@ volumes:
   postgres_data:
   redis_data:
   document_data:
+  hf_cache:
